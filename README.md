@@ -6,6 +6,26 @@
 ![Python](https://img.shields.io/badge/Python-3.10-blue)
 ![Status](https://img.shields.io/badge/Project-Active-brightgreen)
 ![License](https://img.shields.io/badge/License-MIT-green)
+## 📸 Demo Screenshots
+
+### 🟦 Dashboard (Empty State)
+This is how the Mini SOC dashboard looks before any alerts are generated:
+
+![Dashboard Empty](screenshots/dashboard_empty.png)
+
+---
+
+### 🟥 Dashboard (With Alerts)
+After running `simulate_attacks.sh` and collector, alerts appear with severity colors and threat-intel flags:
+
+![Dashboard Alerts](screenshots/dashboard_alerts.png)
+
+---
+
+### 🎥 Live Demo GIF
+Short animated preview of the dashboard updating in real time:
+
+![Demo GIF](screenshots/demo.gif)
 
 ---
 
