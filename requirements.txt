@@ -1,0 +1,4 @@
+Flask
+python-dateutil
+watchdog
+pytest

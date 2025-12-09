@@ -1,0 +1,3 @@
+ip,tag,source
+192.168.1.20,BOTNET_SAMPLE,manual
+10.0.0.6,BAD_ACTOR,manual

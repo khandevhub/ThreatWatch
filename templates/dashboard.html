@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ThreatWatch — Dashboard (Pro)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+<div class="container">
+  <h1>ThreatWatch — Mini SOC (Pro)</h1>
+  <div class="row">
+    <div class="card" id="counters">
+      <div><b>Totals</b></div>
+      <div id="totals">Loading...</div>
+    </div>
+    <div class="card">
+      <canvas id="pieChart" width="300" height="200"></canvas>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="controls">
+      <label>Filter severity:</label>
+      <select id="filterSeverity">
+        <option value="">All</option>
+        <option value="HIGH">HIGH</option>
+        <option value="MEDIUM">MEDIUM</option>
+        <option value="LOW">LOW</option>
+      </select>
+      <label>Filter type:</label>
+      <select id="filterType">
+        <option value="">All</option>
+        <option value="BRUTE_FORCE">BRUTE_FORCE</option>
+        <option value="PORT_SCAN">PORT_SCAN</option>
+        <option value="TRAFFIC_SPIKE">TRAFFIC_SPIKE</option>
+      </select>
+    </div>
+    <div id="alerts"></div>
+  </div>
+</div>
+
+<script>
+let pieChart = null;
+async function fetchSummary(){
+  let res = await fetch('/api/summary');
+  let data = await res.json();
+  let totals = data.counts || {};
+  let sev = data.severity || {};
+  let totalsHtml = '<div class="totals-grid">';
+  for (let k in totals){
+    totalsHtml += `<div class="tile"><b>${k}</b><div>${totals[k]}</div></div>`;
+  }
+  totalsHtml += '</div><div class="sev"><b>Severity:</b> ' + JSON.stringify(sev) + '</div>';
+  document.getElementById('totals').innerHTML = totalsHtml;
+
+  let labels = Object.keys(totals);
+  let values = labels.map(l => totals[l]);
+  if (!pieChart){
+    const ctx = document.getElementById('pieChart').getContext('2d');
+    pieChart = new Chart(ctx, {
+      type: 'pie',
+      data: { labels: labels, datasets: [{ data: values }] },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  } else {
+    pieChart.data.labels = labels;
+    pieChart.data.datasets[0].data = values;
+    pieChart.update();
+  }
+}
+
+async function fetchAlerts(){
+  let sev = document.getElementById('filterSeverity').value;
+  let typ = document.getElementById('filterType').value;
+  let url = '/api/alerts';
+  let params = [];
+  if (sev) params.push('severity=' + encodeURIComponent(sev));
+  if (typ) params.push('type=' + encodeURIComponent(typ));
+  if (params.length) url += '?' + params.join('&');
+  let res = await fetch(url);
+  let data = await res.json();
+  let html = '';
+  if (data.length==0) html = '<p>No alerts yet</p>';
+  for (let a of data){
+    html += `<div class="alert ${a.severity.toLowerCase()}">
+        <div class="meta">${a.time} — <b>${a.rule}</b> — ${a.severity}</div>
+        <div class="details">${a.details}</div>
+    </div>`;
+  }
+  document.getElementById('alerts').innerHTML = html;
+}
+
+document.getElementById('filterSeverity').addEventListener('change', ()=>{ fetchAlerts(); });
+document.getElementById('filterType').addEventListener('change', ()=>{ fetchAlerts(); });
+
+setInterval(()=>{ fetchAlerts(); fetchSummary(); }, 1500);
+fetchAlerts(); fetchSummary();
+</script>
+</body>
+</html>
