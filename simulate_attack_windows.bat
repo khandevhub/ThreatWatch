@@ -1,0 +1,1 @@
+@echo off\npython simulate_attacks.sh\npause

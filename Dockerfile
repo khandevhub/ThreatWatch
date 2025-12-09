@@ -1,0 +1,1 @@
+FROM python:3.10-slim\nWORKDIR /app\nCOPY . /app\nRUN pip install --no-cache-dir -r requirements.txt\nEXPOSE 5000\nENV FLASK_APP=app.py\nCMD ["python", "app.py"]
