@@ -1,0 +1,9 @@
+# Runtime artifacts
+db.sqlite
+*.sqlite
+*.sqlite-journal
+simulated_logs.jsonl
+__pycache__/
+*.pyc
+.venv/
+venv/

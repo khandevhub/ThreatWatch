@@ -1,1 +1,19 @@
-#!/usr/bin/env bash\nOUT="${1:-simulated_logs.jsonl}"\npython - "$OUT" <<'PY'\nimport json, sys, time\nout = sys.argv[1]\nevents = [\n    {"type":"auth_failed","src":"10.0.0.5","message":"Failed password for invalid user"},\n    {"type":"auth_failed","src":"10.0.0.5","message":"Failed password for invalid user"},\n    {"type":"auth_failed","src":"10.0.0.5","message":"Failed password for invalid user"},\n    {"type":"auth_failed","src":"10.0.0.5","message":"Failed password for invalid user"},\n    {"type":"auth_failed","src":"10.0.0.5","message":"Failed password for invalid user"},\n    {"type":"port_scan","src":"10.0.0.6","ports":[22,80,443]},\n    {"type":"traffic_spike","bytes":12345678}\n]\nwith open(out,'w') as f:\n    for e in events:\n        f.write(json.dumps(e) + '\\n')\nprint('Wrote', out)\nPY
+#!/usr/bin/env bash
+OUT="${1:-simulated_logs.jsonl}"
+python - "$OUT" <<'PY'
+import json, sys
+out = sys.argv[1]
+events = [
+    {"type": "auth_failed", "src": "10.0.0.5", "message": "Failed password for invalid user"},
+    {"type": "auth_failed", "src": "10.0.0.5", "message": "Failed password for invalid user"},
+    {"type": "auth_failed", "src": "10.0.0.5", "message": "Failed password for invalid user"},
+    {"type": "auth_failed", "src": "10.0.0.5", "message": "Failed password for invalid user"},
+    {"type": "auth_failed", "src": "10.0.0.5", "message": "Failed password for invalid user"},
+    {"type": "port_scan", "src": "10.0.0.6", "ports": [22, 80, 443]},
+    {"type": "traffic_spike", "bytes": 12345678},
+]
+with open(out, 'w') as f:
+    for e in events:
+        f.write(json.dumps(e) + '\n')
+print('Wrote', out)
+PY

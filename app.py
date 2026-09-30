@@ -1,1 +1,42 @@
-from flask import Flask, render_template, jsonify\nimport sqlite3, os\napp = Flask(__name__)\nDB = os.environ.get('DB_FILE','db.sqlite')\ndef get_alerts(limit=200):\n    conn = sqlite3.connect(DB)\n    c = conn.cursor()\n    c.execute("SELECT id, time, rule, severity, details FROM alerts ORDER BY id DESC LIMIT ?", (limit,))\n    rows = c.fetchall()\n    conn.close()\n    return [{"id": r[0], "time": r[1], "rule": r[2], "severity": r[3], "details": r[4]} for r in rows]\n@app.route('/')\ndef index():\n    return render_template('dashboard.html')\n@app.route('/api/alerts')\ndef api_alerts():\n    return jsonify(get_alerts())\n@app.route('/api/summary')\ndef api_summary():\n    alerts = get_alerts(1000)\n    summary = {}\n    for a in alerts:\n        summary[a['rule']] = summary.get(a['rule'], 0) + 1\n    return jsonify(summary)\nif __name__ == '__main__':\n    conn = sqlite3.connect(DB)\n    conn.execute('''CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, rule TEXT, severity TEXT, details TEXT)''')\n    conn.commit(); conn.close()\n    app.run(debug=True)
+# app.py - Flask dashboard for ThreatWatch
+from flask import Flask, render_template, jsonify
+import sqlite3, os
+
+app = Flask(__name__)
+DB = os.environ.get('DB_FILE', 'db.sqlite')
+
+
+def get_alerts(limit=200):
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("SELECT id, time, rule, severity, details FROM alerts ORDER BY id DESC LIMIT ?", (limit,))
+    rows = c.fetchall()
+    conn.close()
+    return [{"id": r[0], "time": r[1], "rule": r[2], "severity": r[3], "details": r[4]} for r in rows]
+
+
+@app.route('/')
+def index():
+    return render_template('dashboard.html')
+
+
+@app.route('/api/alerts')
+def api_alerts():
+    return jsonify(get_alerts())
+
+
+@app.route('/api/summary')
+def api_summary():
+    alerts = get_alerts(1000)
+    summary = {}
+    for a in alerts:
+        summary[a['rule']] = summary.get(a['rule'], 0) + 1
+    return jsonify(summary)
+
+
+if __name__ == '__main__':
+    conn = sqlite3.connect(DB)
+    conn.execute('''CREATE TABLE IF NOT EXISTS alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, rule TEXT, severity TEXT, details TEXT)''')
+    conn.commit()
+    conn.close()
+    app.run(debug=False, threaded=True)

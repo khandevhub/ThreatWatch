@@ -1,1 +1,110 @@
-<!doctype html><html><head><meta charset='utf-8'><title>ThreatWatch — Dashboard</title><meta name='viewport' content='width=device-width, initial-scale=1'><link rel='stylesheet' href='/static/style.css'><script src='https://cdn.jsdelivr.net/npm/chart.js'></script></head><body><div class='container'><h1>ThreatWatch — Mini SOC</h1><div class='toprow'><div class='counters'><div class='counter'>Total Alerts: <span id='total'>0</span></div><div class='counter'>High: <span id='high'>0</span></div><div class='counter'>Medium: <span id='med'>0</span></div><div class='counter'>Low: <span id='low'>0</span></div></div><div class='chartwrap'><canvas id='ruleChart' width='300' height='200'></canvas></div></div><div class='filters'><label>Filter: <select id='filter' onchange='fetchAlerts()'><option value='all'>All</option><option value='HIGH'>HIGH</option><option value='MEDIUM'>MEDIUM</option><option value='LOW'>LOW</option></select></label></div><div id='alerts'></div></div><script>let chart;async function fetchSummary(){let res=await fetch('/api/summary');let data=await res.json();return data;}async function fetchAlerts(){let res=await fetch('/api/alerts');let data=await res.json();const filter=document.getElementById('filter').value;let html='';let total=0,high=0,med=0,low=0;for(let a of data){if(filter!=='all'&&a.severity!==filter) continue;total++;if(a.severity==='HIGH') high++;if(a.severity==='MEDIUM') med++;if(a.severity==='LOW') low++;html+=`<div class='alert ${a.severity.toLowerCase()}'><div class='meta'>${a.time} — <b>${a.rule}</b> — ${a.severity}</div><div class='details'>${a.details}</div></div>`;}document.getElementById('alerts').innerHTML=html||'<p>No alerts yet</p>';document.getElementById('total').innerText=total;document.getElementById('high').innerText=high;document.getElementById('med').innerText=med;document.getElementById('low').innerText=low;const summary=await fetchSummary();const labels=Object.keys(summary);const values=Object.values(summary);if(!chart){const ctx=document.getElementById('ruleChart').getContext('2d');chart=new Chart(ctx,{type:'bar',data:{labels:labels,datasets:[{label:'Alerts',data:values}]},options:{responsive:true}});}else{chart.data.labels=labels;chart.data.datasets[0].data=values;chart.update();}}setInterval(fetchAlerts,1500);fetchAlerts();</script></body></html>
+<!doctype html>
+<html>
+<head>
+  <meta charset='utf-8'>
+  <title>ThreatWatch — Dashboard</title>
+  <meta name='viewport' content='width=device-width, initial-scale=1'>
+  <link rel='stylesheet' href='/static/style.css'>
+  <script src='https://cdn.jsdelivr.net/npm/chart.js'></script>
+</head>
+<body>
+<div class='container'>
+  <h1>ThreatWatch — Mini SOC</h1>
+  <div class='toprow'>
+    <div class='counters'>
+      <div class='counter'>Total Alerts: <span id='total'>0</span></div>
+      <div class='counter'>High: <span id='high'>0</span></div>
+      <div class='counter'>Medium: <span id='med'>0</span></div>
+      <div class='counter'>Low: <span id='low'>0</span></div>
+    </div>
+    <div class='chartwrap'><canvas id='chart' width='300' height='200'></canvas></div>
+  </div>
+  <div class='filters'>
+    <label>Filter:
+      <select id='filter'>
+        <option value='all'>All</option>
+        <option value='HIGH'>HIGH</option>
+        <option value='MEDIUM'>MEDIUM</option>
+        <option value='LOW'>LOW</option>
+      </select>
+      <button id='refreshBtn' type='button'>Refresh now</button>
+    </label>
+  </div>
+  <div id='alerts'></div>
+  <div id='lastUpdate' class='meta' style='margin-top:12px'></div>
+</div>
+<script>
+(function () {
+  var chart = null;
+  var filterSel = document.getElementById('filter');
+
+  function fetchJSON(url) {
+    return fetch(url).then(function (r) { return r.json(); });
+  }
+
+  function buildAlertCard(a) {
+    var card = document.createElement('div');
+    card.className = 'alert ' + a.severity.toLowerCase();
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = a.time + ' — ' + a.rule + ' — ' + a.severity;
+    var details = document.createElement('div');
+    details.className = 'details';
+    details.textContent = a.details;
+    card.appendChild(meta);
+    card.appendChild(details);
+    return card;
+  }
+
+  function updateCounters(alerts) {
+    document.getElementById('total').textContent = String(alerts.length);
+    var high = 0, med = 0, low = 0;
+    alerts.forEach(function (a) {
+      if (a.severity === 'HIGH') high++;
+      else if (a.severity === 'MEDIUM') med++;
+      else if (a.severity === 'LOW') low++;
+    });
+    document.getElementById('high').textContent = String(high);
+    document.getElementById('med').textContent = String(med);
+    document.getElementById('low').textContent = String(low);
+  }
+
+  function updateChart() {
+    fetchJSON('/api/summary').then(function (summary) {
+      var labels = Object.keys(summary);
+      var values = labels.map(function (k) { return summary[k]; });
+      if (!chart) {
+        var ctx = document.getElementById('chart').getContext('2d');
+        chart = new Chart(ctx, {
+          type: 'bar',
+          data: { labels: labels, datasets: [{ label: 'Alerts', data: values }] },
+          options: { responsive: true }
+        });
+      } else {
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = values;
+        chart.update();
+      }
+    });
+  }
+
+  function fetchAlerts() {
+    fetchJSON('/api/alerts').then(function (data) {
+      var alerts = Array.isArray(data) ? data : [];
+      var f = filterSel.value;
+      var shown = alerts.filter(function (a) { return f === 'all' || a.severity === f; });
+      var container = document.getElementById('alerts');
+      container.replaceChildren.apply(container, shown.map(buildAlertCard));
+      updateCounters(alerts);
+      updateChart();
+    });
+  }
+
+  filterSel.addEventListener('change', fetchAlerts);
+  document.getElementById('refreshBtn').addEventListener('click', fetchAlerts);
+  setInterval(fetchAlerts, 1500);
+  fetchAlerts();
+})();
+</script>
+</body>
+</html>
