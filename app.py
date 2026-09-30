@@ -1,6 +1,7 @@
 """Local ThreatWatch dashboard and authenticated event-ingest API."""
 from collections import deque
 import hmac
+import json
 import logging
 import os
 import sqlite3
@@ -47,17 +48,65 @@ class IngestRateLimiter:
             return True
 
 
+SOC_ALERT_FIELDS = (
+    'detection_id', 'rule_id', 'deterministic_risk_score', 'risk_band',
+    'risk_factors_json', 'risk_explanation', 'jev_priority', 'jev_malicious_likelihood',
+    'jev_false_positive_likelihood', 'jev_investigation_required',
+    'jev_attack_category', 'jev_status', 'mitre_techniques_json',
+    'evidence_json', 'source_event_ids_json', 'correlation_id',
+    'investigation_status',
+)
+
+
+def _soc_alert_fields(row):
+    """Flatten the SOC columns of one alerts row into JSON-safe values."""
+    fields = {}
+    for name in SOC_ALERT_FIELDS:
+        value = row[name]
+        if name.endswith('_json'):
+            try:
+                value = json.loads(value) if value is not None else None
+            except (TypeError, ValueError):
+                value = None
+            fields[name[:-5]] = value
+        elif name == 'jev_investigation_required':
+            fields['investigation_required'] = bool(value) if value is not None else None
+        else:
+            fields[name] = value
+    return fields
+
+
 def get_alerts(limit=200, db_file=None):
     with connect(db_file or DB) as connection:
+        columns = ', '.join(('id', 'time', 'rule', 'severity', 'details') + SOC_ALERT_FIELDS)
         rows = connection.execute(
-            'SELECT id, time, rule, severity, details FROM alerts ORDER BY id DESC LIMIT ?',
+            f'SELECT {columns} FROM alerts ORDER BY id DESC LIMIT ?',
             (limit,),
         ).fetchall()
-    return [
-        {'id': row['id'], 'time': row['time'], 'rule': row['rule'],
-         'severity': row['severity'], 'details': row['details']}
-        for row in rows
-    ]
+    alerts = []
+    for row in rows:
+        alert = {
+            'id': row['id'], 'time': row['time'], 'rule': row['rule'],
+            'severity': row['severity'], 'details': row['details'],
+        }
+        alert.update(_soc_alert_fields(row))
+        alerts.append(alert)
+    return alerts
+
+
+INVESTIGATION_STATUSES = ('new', 'in_progress', 'closed')
+
+
+def set_investigation_status(alert_id, status, db_file=None):
+    if status not in INVESTIGATION_STATUSES:
+        raise ValueError('invalid investigation status')
+    with connect(db_file or DB) as connection:
+        cursor = connection.execute(
+            'UPDATE alerts SET investigation_status = ? WHERE id = ?',
+            (status, alert_id),
+        )
+        connection.commit()
+        return cursor.rowcount == 1
 
 
 def create_app(config=None):
@@ -118,6 +167,30 @@ def create_app(config=None):
     @application.get('/api/health')
     def api_health():
         return jsonify(status='ok')
+
+    @application.post('/api/alerts/<int:alert_id>/status')
+    def api_alert_status(alert_id):
+        expected = application.config.get('INGEST_TOKEN')
+        if not expected:
+            return jsonify(error='authentication_disabled'), 503
+        authorization = request.headers.get('Authorization', '')
+        scheme, separator, supplied = authorization.partition(' ')
+        if scheme.lower() != 'bearer' or not separator or not supplied:
+            return jsonify(error='authentication_required'), 401, {'WWW-Authenticate': 'Bearer'}
+        if not hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')):
+            return jsonify(error='invalid_credentials'), 401, {'WWW-Authenticate': 'Bearer'}
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict) or body.get('status') not in INVESTIGATION_STATUSES:
+            return jsonify(error='invalid_status'), 400
+        try:
+            updated = set_investigation_status(
+                alert_id, body['status'], db_file=application.config['DB_FILE'])
+        except sqlite3.Error:
+            logger.exception('Investigation status update failed')
+            return jsonify(error='storage_unavailable'), 503
+        if not updated:
+            return jsonify(error='alert_not_found'), 404
+        return jsonify(alert_id=alert_id, status=body['status'])
 
     @application.post('/api/ingest')
     def api_ingest():

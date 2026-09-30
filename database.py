@@ -7,7 +7,7 @@ import sqlite3
 import time
 
 DB = os.environ.get('DB_FILE', 'db.sqlite')
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class EventIdConflictError(ValueError):
@@ -93,12 +93,38 @@ def init_db(db_file=None):
                     event_id TEXT REFERENCES events(event_id) ON DELETE SET NULL
                 )
             ''')
+            # -- SOC-core alert columns (schema v2) --------------------------
+            # Kept NULL-tolerant so Phase 1 rows remain valid. Existing alert
+            # consumers keep working; new fields appear alongside them.
             alert_columns = {
                 row['name'] for row in connection.execute('PRAGMA table_info(alerts)')
             }
             if 'event_id' not in alert_columns:
                 connection.execute(
                     'ALTER TABLE alerts ADD COLUMN event_id TEXT REFERENCES events(event_id) ON DELETE SET NULL')
+            soc_columns = {
+                'detection_id': 'TEXT',
+                'rule_id': 'TEXT',
+                'deterministic_risk_score': 'INTEGER',
+                'risk_band': 'TEXT',
+                'risk_factors_json': 'TEXT',
+                'risk_explanation': 'TEXT',
+                'jev_priority': 'TEXT',
+                'jev_malicious_likelihood': 'REAL',
+                'jev_false_positive_likelihood': 'REAL',
+                'jev_investigation_required': 'INTEGER',
+                'jev_attack_category': 'TEXT',
+                'jev_status': 'TEXT',
+                'mitre_techniques_json': 'TEXT',
+                'evidence_json': 'TEXT',
+                'source_event_ids_json': 'TEXT',
+                'correlation_id': 'TEXT',
+                'investigation_status': "TEXT NOT NULL DEFAULT 'new'",
+            }
+            for column, column_type in soc_columns.items():
+                if column not in alert_columns:
+                    connection.execute(
+                        f'ALTER TABLE alerts ADD COLUMN {column} {column_type}')
 
             connection.execute('''
                 CREATE TABLE IF NOT EXISTS alert_enrichment (
@@ -136,9 +162,37 @@ def init_db(db_file=None):
                 CREATE TABLE IF NOT EXISTS failed_login_attempts (
                     event_id TEXT PRIMARY KEY REFERENCES events(event_id) ON DELETE CASCADE,
                     source_ip TEXT NOT NULL,
-                    event_time TEXT NOT NULL
+                    event_time TEXT NOT NULL,
+                    user_name TEXT
                 )
             ''')
+            fla_columns = {
+                row['name'] for row in connection.execute(
+                    'PRAGMA table_info(failed_login_attempts)')
+            }
+            if 'user_name' not in fla_columns:
+                connection.execute(
+                    'ALTER TABLE failed_login_attempts ADD COLUMN user_name TEXT')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS correlations (
+                    correlation_id TEXT PRIMARY KEY,
+                    key TEXT NOT NULL,
+                    primary_rule_id TEXT NOT NULL,
+                    event_count INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS alert_suppression (
+                    scope TEXT NOT NULL,
+                    indicator TEXT NOT NULL,
+                    last_alert_time TEXT NOT NULL,
+                    PRIMARY KEY (scope, indicator)
+                )
+            ''')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id, id DESC)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_correlation ON alerts(correlation_id)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_correlations_key ON correlations(key)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(time DESC, id DESC)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule, id DESC)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_events_time_type ON events(event_time, event_type)')

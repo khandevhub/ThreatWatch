@@ -22,7 +22,34 @@
     details.textContent = alert.details;
     card.appendChild(meta);
     card.appendChild(details);
+    var soc = buildSocLine(alert);
+    if (soc) card.appendChild(soc);
     return card;
+  }
+
+  function buildSocLine(alert) {
+    var parts = [];
+    if (alert.deterministic_risk_score !== null && alert.deterministic_risk_score !== undefined) {
+      var band = alert.risk_band ? ' (' + alert.risk_band + ')' : '';
+      parts.push('risk ' + alert.deterministic_risk_score + '/100' + band);
+    }
+    if (alert.jev_priority) {
+      parts.push('jev: ' + alert.jev_priority);
+    }
+    if (alert.attack_category) {
+      parts.push('category: ' + alert.attack_category);
+    }
+    if (alert.mitre_techniques && alert.mitre_techniques.length) {
+      parts.push('ATT&CK: ' + alert.mitre_techniques.join(', '));
+    }
+    if (alert.investigation_status && alert.investigation_status !== 'new') {
+      parts.push('status: ' + alert.investigation_status);
+    }
+    if (!parts.length) return null;
+    var line = document.createElement('div');
+    line.className = 'meta soc-line';
+    line.textContent = parts.join(' \u00b7 ');
+    return line;
   }
 
   function updateCounters(alerts) {

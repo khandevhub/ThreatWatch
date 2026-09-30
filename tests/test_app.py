@@ -67,4 +67,7 @@ def test_summary_endpoint_counts_by_rule(api_client):
 def test_alert_payload_has_expected_fields(api_client):
     client, _ = api_client
     data = client.get('/api/alerts').get_json()
-    assert set(data[0].keys()) == {'id', 'time', 'rule', 'severity', 'details'}
+    # Phase 1 fields remain present; Phase 2 SOC fields are additive.
+    assert {'id', 'time', 'rule', 'severity', 'details'} <= set(data[0].keys())
+    assert 'deterministic_risk_score' in data[0]
+    assert data[0]['deterministic_risk_score'] is None  # legacy row has no SOC data
