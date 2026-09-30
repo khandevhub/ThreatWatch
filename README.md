@@ -27,7 +27,7 @@ JEV STRUCTURED DECISION   decision.DecisionProvider (Jev | Mock | disabled)
       ↓
 ALERT PRIORITIZATION   alerts table (risk band + Jev priority)
       ↓
-INVESTIGATION   investigation_status lifecycle (new → in_progress → closed)
+INVESTIGATION   investigation_status lifecycle (new → investigating → resolved/dismissed)
 ```
 
 Detection architecture: every rule is declared once in `rules.py` (id, name,
@@ -36,6 +36,29 @@ mapping) and implemented in `detections.py`. Rules are independently testable,
 individually disableable via `RULE_<ID>_ENABLED=false`, and tunable via
 `RULE_<ID>_THRESHOLD`, `RULE_<ID>_WINDOW`, and `RULE_<ID>_SEVERITY`. Thresholds
 and windows are deterministic; Jev adds advisory metadata only.
+
+## Phase 3 — AI SOC investigation layer at a glance
+
+```
+STORED SOC ALERT
+      ↓
+EVIDENCE MODEL   evidence.py (secret redaction, bounded timeline, typed entities)
+      ↓
+INVESTIGATION PACKAGE   investigation.py (risk, entities, threat intel, ATT&CK,
+      ↓                  related alerts, analyst questions — deterministic JSON)
+ADVISORY AI PERSPECTIVE   investigation_provider.py (mock | disabled; offline)
+      ↓
+DASHBOARD PANEL   static/dashboard.js (text-node rendering, Investigate toggle)
+      ↓
+LIFECYCLE & AUDIT   app.py + database.py v3 (transition matrix, audit table)
+      ↓
+THREAT HUNTING   hunting.py (GET /api/hunt — whitelisted, parameterized, bounded)
+```
+
+Everything in Phase 3 is offline and deterministic by default: the only AI is a
+mock provider that derives its output from the package itself, and enabling it
+(`INVESTIGATION_AI_ENABLED=1`) never produces network calls. See
+"Investigation and hunting (Phase 3)" below for details.
 
 ## Requirements and reproducible setup
 
@@ -200,11 +223,71 @@ the pipeline produces spraying and PowerShell alerts with risk, correlation, and
 ### Investigation lifecycle
 
 Every SOC alert starts with `investigation_status = new`. An authenticated client
-can progress it: `POST /api/alerts/<id>/status` with `{"status": "in_progress"}`
-or `"closed"` (same bearer token as ingestion). The dashboard shows status on
+can progress it: `POST /api/alerts/<id>/status` with `{"status": "investigating"}`
+(or the Phase 2 aliases `"in_progress"`/`"closed"`, which canonicalize on storage;
+same bearer token as ingestion). Transitions follow a deterministic matrix —
+`new → investigating/resolved/dismissed`, `investigating → investigating/resolved/dismissed`,
+`resolved → investigating/dismissed`, `dismissed → investigating` — and every
+accepted transition writes an `investigation_events` audit row (from/to status,
+timestamp, source). Invalid transitions are rejected with HTTP 409, unknown
+statuses with 400, and missing alerts with 404. The dashboard shows status on
 each alert card; `GET /api/alerts` returns the full SOC view (risk score/band/
 factors/explanation, Jev metadata, ATT&CK techniques, evidence, source event IDs,
 correlation ID, status).
+
+## Investigation and hunting (Phase 3)
+
+Phase 3 turns a stored alert into an analyst-ready investigation package, adds a
+bounded threat-hunting query layer, and an advisory AI-provider seam — all local,
+deterministic, and offline by default. No RAG, embeddings, vector store, or
+external AI calls are introduced.
+
+**Evidence model** (`evidence.py`): every free-text field passes `redact_text`,
+which masks passwords/API keys/tokens (`key=value` forms and `Bearer …` headers),
+replaces private-key blocks, and bounds length. `build_timeline` orders events
+deterministically (timestamp → event ID; missing timestamps sort last and are
+flagged) and is capped at 100 entries. `Evidence` carries typed entity lists
+(IPs, hosts, users, processes, commands, domains, URLs, hashes) and an explicit
+`unavailable` list instead of invented values.
+
+**Investigation packages** (`investigation.py`): `GET /api/alerts/<id>/investigation`
+returns one alert's package: alert view, risk score/band/factors/explanation,
+evidence with entities, ordered timeline, indicators (with `known_malicious`
+flags), threat-intelligence context (stored enrichment plus current feed matches),
+MITRE ATT&CK context (stored mappings only, labeled with canonical technique
+names and per-technique suggested next steps; merged alerts attribute each
+technique to the member rule that maps to it), related alerts (same correlation
+first, then same-rule history), and deterministic analyst questions. Packages are
+JSON-serializable, bounded, deterministic, and secret-safe; unknown alerts return 404.
+
+**Hunting** (`hunting.py`): `GET /api/hunt` runs a whitelisted, parameterized query
+over stored events. Filters: exact (`src_ip`, `dst_ip`, `event_type`, `file_hash`),
+substring (`user`, `host`, `process`, `command`, `domain`, `url`; LIKE wildcards
+escaped, character allowlist), time (`time_from`/`time_to`, semantically validated
+ISO-8601), and linkage (`alert_id`, `correlation_id`, `technique` — the technique
+match is quote-delimited so `T1110` never matches `T1110.003`). Unknown filters,
+unsafe values, and bad paging fail closed with 400. Results are ordered by
+`(event_time, event_id)`, paginated (`limit` ≤ 500), secret-redacted, and an
+unknown `alert_id` yields an empty set — never an unfiltered query.
+
+**AI provider seam** (`investigation_provider.py`): `InvestigationProvider`
+defines `investigate`/`summarize`/`generate_hypotheses`. Phase 3 ships two offline
+implementations: `MockInvestigationProvider` (deterministic summaries/hypotheses
+derived only from the package) and `DisabledInvestigationProvider` (the default).
+`INVESTIGATION_AI_ENABLED=1` selects the mock; packages gain an `ai_perspective`
+section whose status is `disabled`, `ok`, or `unavailable` (provider failures are
+downgraded to `unavailable`, never breaking the package). No network calls are
+made from this layer; Jev remains the separate decision layer.
+
+**Lifecycle and audit** (`database.py`, `app.py`): schema v3 adds the
+`investigation_events` audit table (cascade-deleted with its alert) and a migration
+that canonicalizes Phase 2 `in_progress`/`closed` values to
+`investigating`/`resolved`.
+
+**Dashboard**: each alert card gains an Investigate toggle that renders the
+canonical package sections (status, risk, entities, unavailable evidence, threat
+intel, ATT&CK, related alerts, first ten timeline entries, suggested next steps)
+using text nodes only — no `innerHTML`, no template changes.
 
 ## Configuration
 
@@ -217,6 +300,7 @@ correlation ID, status).
 | `BRUTE_FORCE_THRESHOLD` | `5` | Failed-logins threshold; positive integer |
 | `INGEST_TOKEN` | unset | Bearer token; at least 32 characters when set |
 | `INGEST_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `INGEST_TOKEN` |
+| `INVESTIGATION_AI_ENABLED` | `false` | Attach the offline mock AI perspective to investigation packages |
 | `PORT` | `5000` | Local Waitress port when running `python app.py` |
 
 ## Tests and project layout
@@ -226,9 +310,15 @@ uv run --locked --group dev python -m pytest -q
 uv run --locked --group dev pip-audit
 ```
 
-The suite covers event validation, database creation/migration, restart-safe collection and deduplication, the current deterministic rules and threat-intel enrichment, API authentication/errors, simulator/API end-to-end behavior, dashboard safety, and path handling.
+The suite covers event validation, database creation/migration (including the
+Phase 3 status canonicalization), restart-safe collection and deduplication, the
+current deterministic rules and threat-intel enrichment, API authentication/errors,
+simulator/API end-to-end behavior, dashboard safety, path handling, and the Phase 3
+evidence/redaction model, investigation packages, hunting (filters, limits,
+SQL-injection attempts), lifecycle transitions/audit, provider seam, and a full
+Phase 3 end-to-end flow.
 
-Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v2, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `app.py` (dashboard API, protected ingestion, investigation status), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
 
 ## Current limitations
 
@@ -236,7 +326,7 @@ Important files: `event_model.py` (versioned validation/normalization), `databas
 - Traffic spikes still fire on event type, not a measured baseline.
 - Threat intelligence remains a small static CSV without feed lifecycle, expiry, or history; enrichment is exact-match only.
 - Correlation is indicator-based within the SQLite/local deployment; there is no distributed streaming, and suppression state is per-database.
-- Jev is advisory only; there is no autonomous response, blocking, or SOAR. No RAG, ML, or AI investigation features are included.
+- Jev is advisory only; there is no autonomous response, blocking, or SOAR. Phase 3 adds a deterministic offline AI-perspective seam only — no RAG, embeddings, vector store, chatbot, or external AI calls in the investigation layer.
 - Dashboard and read-only alert APIs have no user accounts/RBAC; keep them on loopback or add an authenticated access layer before any remote exposure.
 - SQLite and the in-process rate limiter are for a single local deployment, not a multi-node service.
-- No Sigma parser, case management, or threat-hunting workbench are included in this phase.
+- The hunting layer is exact/substring over stored events with alert linkage; there is no Sigma parser, saved-query workbench, cross-database federated search, or case management.

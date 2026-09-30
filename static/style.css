@@ -87,3 +87,32 @@ p {
   background: #f2f2f2;
   border-left: 6px solid #7f8c8d;
 }
+
+/* Phase 3: investigation panel */
+.investigate-btn {
+  margin-top: 6px;
+  font-size: 0.8em;
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.investigation {
+  border-left: 3px solid #7f8c8d;
+  margin: 8px 0;
+  padding: 4px 12px;
+  background: #fafafa;
+}
+
+.investigation .inv-section-title {
+  font-weight: bold;
+  margin: 8px 0 2px;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  color: #444;
+}
+
+.investigation .inv-line {
+  font-size: 0.85em;
+  margin: 2px 0;
+  overflow-wrap: anywhere;
+}

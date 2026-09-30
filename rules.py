@@ -240,5 +240,23 @@ def load_rules(environ=None):
     return registry
 
 
+# Canonical MITRE ATT&CK technique names for the IDs used by the seed
+# rules. Only techniques referenced by rule definitions appear here; this
+# table labels existing mappings and never invents new ones.
+ATTACK_TECHNIQUE_NAMES = {
+    'T1110': 'Brute Force',
+    'T1110.003': 'Password Spraying',
+    'T1046': 'Network Service Scanning',
+    'T1059': 'Command and Scripting Interpreter',
+    'T1059.001': 'PowerShell',
+    'T1059.004': 'Unix Shell',
+    'T1027': 'Obfuscated Files or Information',
+    'T1548.003': 'Sudo and Sudo Caching',
+    'T1078.003': 'Local Accounts',
+    'T1053.003': 'Cron',
+    'T1543.002': 'Systemd Service',
+    'T1048.003': 'Exfiltration Over Unencrypted Non-C2 Protocol',
+}
+
 # Additional readable aliases used by detectors and tests.
 SEED_RULES_COUNT = 10

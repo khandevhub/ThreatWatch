@@ -24,7 +24,144 @@
     card.appendChild(details);
     var soc = buildSocLine(alert);
     if (soc) card.appendChild(soc);
+    card.appendChild(buildInvestigateButton(alert));
     return card;
+  }
+
+  function buildInvestigateButton(alert) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'investigate-btn';
+    button.textContent = 'Investigate';
+    button.addEventListener('click', function () {
+      toggleInvestigation(alert.id, button);
+    });
+    return button;
+  }
+
+  function toggleInvestigation(alertId, button) {
+    var existing = document.getElementById('investigation-' + alertId);
+    if (existing) {
+      existing.remove();
+      button.textContent = 'Investigate';
+      return;
+    }
+    button.textContent = 'Loading...';
+    fetchJSON('/api/alerts/' + alertId + '/investigation').then(function (pkg) {
+      var panel = buildInvestigationPanel(pkg);
+      panel.id = 'investigation-' + alertId;
+      var container = document.getElementById('alerts');
+      var alertCard = button.closest('.alert');
+      if (alertCard && alertCard.parentNode === container) {
+        alertCard.parentNode.insertBefore(panel, alertCard.nextSibling);
+      } else {
+        container.appendChild(panel);
+      }
+      button.textContent = 'Close investigation';
+    }).catch(function () {
+      button.textContent = 'Investigation unavailable';
+    });
+  }
+
+  function addSection(panel, title) {
+    var heading = document.createElement('div');
+    heading.className = 'inv-section-title';
+    heading.textContent = title;
+    panel.appendChild(heading);
+    var body = document.createElement('div');
+    body.className = 'inv-section';
+    panel.appendChild(body);
+    return body;
+  }
+
+  function addLines(container, lines) {
+    lines.forEach(function (line) {
+      var item = document.createElement('div');
+      item.className = 'inv-line';
+      item.textContent = line;
+      container.appendChild(item);
+    });
+  }
+
+  function buildInvestigationPanel(pkg) {
+    var panel = document.createElement('div');
+    panel.className = 'investigation';
+    var evidence = (pkg && pkg.evidence) || {};
+    var entities = evidence.entities || {};
+    var risk = (pkg && pkg.risk) || {};
+
+    var header = addSection(panel, 'Investigation — alert #' + ((pkg.alert || {}).alert_id));
+    addLines(header, [
+      'Status: ' + ((pkg.alert || {}).investigation_status || 'unknown'),
+      'Risk: ' + (risk.score === null || risk.score === undefined ? 'unavailable' :
+        risk.score + '/100 (' + (risk.band || 'unknown') + ')'),
+    ]);
+    if (risk.explanation) addLines(header, [risk.explanation]);
+
+    var entityLines = [];
+    Object.keys(entities).forEach(function (kind) {
+      if (entities[kind] && entities[kind].length) {
+        entityLines.push(kind.replace(/_/g, ' ') + ': ' + entities[kind].join(', '));
+      }
+    });
+    if (entityLines.length) {
+      var entityBody = addSection(panel, 'Evidence (entities)');
+      addLines(entityBody, entityLines);
+    }
+    if (evidence.unavailable && evidence.unavailable.length) {
+      var missing = addSection(panel, 'Evidence unavailable');
+      addLines(missing, [evidence.unavailable.join(', ')]);
+    }
+
+    var intel = (pkg && pkg.threat_intel) || {};
+    if (intel.matches && intel.matches.length) {
+      var intelBody = addSection(panel, 'Threat intelligence');
+      addLines(intelBody, intel.matches.map(function (match) {
+        if (match.fields) {
+          return 'stored enrichment: ' + Object.keys(match.fields)
+            .map(function (key) { return key + '=' + match.fields[key]; }).join(', ');
+        }
+        return (match.known_malicious ? 'KNOWN ' : 'unknown ') +
+          match.indicator_type + ' ' + match.indicator +
+          ' (confidence ' + match.confidence + ')';
+      }));
+    }
+
+    var mitre = (pkg && pkg.mitre) || {};
+    if (mitre.techniques && mitre.techniques.length) {
+      var mitreBody = addSection(panel, 'MITRE ATT&CK');
+      addLines(mitreBody, mitre.techniques.map(function (technique) {
+        return technique.technique_id + ' ' + (technique.technique_name || '') +
+          (technique.suggested_next_step ? ' — ' + technique.suggested_next_step : '');
+      }));
+    }
+
+    var related = (pkg && pkg.related_alerts) || {};
+    if (related.alerts && related.alerts.length) {
+      var relatedBody = addSection(panel, 'Related alerts');
+      addLines(relatedBody, related.alerts.slice(0, 10).map(function (alert) {
+        return '#' + alert.alert_id + ' ' + alert.rule + ' (' + alert.severity +
+          ', ' + alert.relation + ')';
+      }));
+    }
+
+    var timeline = (pkg && pkg.timeline) || {};
+    if (timeline.entries && timeline.entries.length) {
+      var timelineBody = addSection(panel, 'Timeline (' + timeline.total_events + ' events)');
+      addLines(timelineBody, timeline.entries.slice(0, 10).map(function (entry) {
+        return (entry.timestamp || '(no timestamp)') + ' — ' +
+          (entry.event_type || '?') +
+          (entry.src_ip ? ' — ' + entry.src_ip : '') +
+          (entry.user ? ' — ' + entry.user : '');
+      }));
+    }
+
+    var questions = (pkg && pkg.investigation_questions) || [];
+    if (questions.length) {
+      var questionBody = addSection(panel, 'Suggested next steps');
+      addLines(questionBody, questions);
+    }
+    return panel;
   }
 
   function buildSocLine(alert) {

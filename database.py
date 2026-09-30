@@ -7,7 +7,7 @@ import sqlite3
 import time
 
 DB = os.environ.get('DB_FILE', 'db.sqlite')
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class EventIdConflictError(ValueError):
@@ -190,9 +190,28 @@ def init_db(db_file=None):
                     PRIMARY KEY (scope, indicator)
                 )
             ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS investigation_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+                    from_status TEXT,
+                    to_status TEXT NOT NULL,
+                    changed_at TEXT NOT NULL,
+                    source TEXT NOT NULL
+                )
+            ''')
+            # Phase 2 lifecycle values canonicalize to the Phase 3 states.
+            if version < 3:
+                connection.execute(
+                    "UPDATE alerts SET investigation_status = 'investigating' "
+                    "WHERE investigation_status = 'in_progress'")
+                connection.execute(
+                    "UPDATE alerts SET investigation_status = 'resolved' "
+                    "WHERE investigation_status = 'closed'")
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule_id ON alerts(rule_id, id DESC)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_correlation ON alerts(correlation_id)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_correlations_key ON correlations(key)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_investigation_events_alert ON investigation_events(alert_id)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(time DESC, id DESC)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule, id DESC)')
             connection.execute('CREATE INDEX IF NOT EXISTS idx_events_time_type ON events(event_time, event_type)')

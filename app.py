@@ -11,9 +11,12 @@ import time
 from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
-from database import DB, EventIdConflictError, connect, init_db
+from database import DB, EventIdConflictError, connect, init_db, utc_now
 from detector import process_event
 from event_model import EventValidationError, SecurityEvent
+from hunting import HuntError, hunt
+from investigation import InvestigationError, InvestigationService
+from investigation_provider import apply_investigation_provider, make_investigation_provider
 
 from security_config import load_ingest_token, validate_ingest_token
 
@@ -94,19 +97,84 @@ def get_alerts(limit=200, db_file=None):
     return alerts
 
 
-INVESTIGATION_STATUSES = ('new', 'in_progress', 'closed')
+# -- Phase 3 investigation lifecycle ------------------------------------
+# Canonical states with a deterministic transition matrix. Phase 2 input
+# values ('in_progress', 'closed') remain accepted as aliases and are
+# canonicalized before storage; arbitrary values are always rejected.
+INVESTIGATION_STATUSES = ('new', 'investigating', 'resolved', 'dismissed')
+STATUS_ALIASES = {'in_progress': 'investigating', 'closed': 'resolved'}
+
+ALLOWED_TRANSITIONS = {
+    'new': frozenset({'new', 'investigating', 'resolved', 'dismissed'}),
+    'investigating': frozenset({'investigating', 'resolved', 'dismissed'}),
+    'resolved': frozenset({'investigating', 'dismissed'}),
+    'dismissed': frozenset({'investigating'}),
+}
 
 
-def set_investigation_status(alert_id, status, db_file=None):
-    if status not in INVESTIGATION_STATUSES:
+class InvestigationTransitionError(ValueError):
+    """A lifecycle transition that the deterministic matrix forbids."""
+
+
+def canonical_investigation_status(status):
+    """Map a requested status (or Phase 2 alias) to its canonical value."""
+    if not isinstance(status, str):
+        raise ValueError('investigation status must be a string')
+    value = STATUS_ALIASES.get(status.strip().lower(), status.strip().lower())
+    if value not in INVESTIGATION_STATUSES:
         raise ValueError('invalid investigation status')
+    return value
+
+
+def get_investigation_status(alert_id, db_file=None):
     with connect(db_file or DB) as connection:
-        cursor = connection.execute(
-            'UPDATE alerts SET investigation_status = ? WHERE id = ?',
-            (status, alert_id),
-        )
-        connection.commit()
-        return cursor.rowcount == 1
+        row = connection.execute(
+            'SELECT investigation_status FROM alerts WHERE id = ?',
+            (alert_id,)).fetchone()
+    return row['investigation_status'] if row else None
+
+
+def set_investigation_status(alert_id, status, db_file=None, source='api'):
+    """Apply one lifecycle transition atomically and audit it.
+
+    Raises ValueError for unknown states and InvestigationTransitionError
+    for transitions the matrix forbids. Every accepted transition writes an
+    investigation_events audit row before committing.
+    """
+    target = canonical_investigation_status(status)
+    with connect(db_file or DB) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            row = connection.execute(
+                'SELECT investigation_status FROM alerts WHERE id = ?',
+                (alert_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                return False
+            current = row['investigation_status']
+            # Tolerate pre-Phase-3 stored values when checking the matrix.
+            current_canonical = STATUS_ALIASES.get(current, current)
+            if current_canonical not in ALLOWED_TRANSITIONS:
+                current_canonical = 'new'
+            if target not in ALLOWED_TRANSITIONS[current_canonical]:
+                connection.rollback()
+                raise InvestigationTransitionError(
+                    f'transition {current_canonical} -> {target} is not allowed')
+            connection.execute(
+                'UPDATE alerts SET investigation_status = ? WHERE id = ?',
+                (target, alert_id),
+            )
+            connection.execute(
+                'INSERT INTO investigation_events '
+                '(alert_id, from_status, to_status, changed_at, source) '
+                'VALUES (?, ?, ?, ?, ?)',
+                (alert_id, current, target, utc_now(), source),
+            )
+            connection.commit()
+            return True
+        except Exception:
+            connection.rollback()
+            raise
 
 
 def create_app(config=None):
@@ -180,17 +248,62 @@ def create_app(config=None):
         if not hmac.compare_digest(supplied.encode('utf-8'), expected.encode('utf-8')):
             return jsonify(error='invalid_credentials'), 401, {'WWW-Authenticate': 'Bearer'}
         body = request.get_json(silent=True)
-        if not isinstance(body, dict) or body.get('status') not in INVESTIGATION_STATUSES:
+        try:
+            requested = canonical_investigation_status(
+                body.get('status') if isinstance(body, dict) else None)
+        except ValueError:
             return jsonify(error='invalid_status'), 400
         try:
             updated = set_investigation_status(
-                alert_id, body['status'], db_file=application.config['DB_FILE'])
+                alert_id, requested, db_file=application.config['DB_FILE'])
+        except InvestigationTransitionError:
+            return jsonify(error='invalid_transition'), 409
         except sqlite3.Error:
             logger.exception('Investigation status update failed')
             return jsonify(error='storage_unavailable'), 503
         if not updated:
             return jsonify(error='alert_not_found'), 404
-        return jsonify(alert_id=alert_id, status=body['status'])
+        return jsonify(alert_id=alert_id, status=requested)
+
+    @application.get('/api/alerts/<int:alert_id>/investigation')
+    def api_alert_investigation(alert_id):
+        service = InvestigationService(db_file=application.config['DB_FILE'])
+        try:
+            package = service.build_investigation(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        # Advisory AI perspective (disabled by default; never networked here).
+        apply_investigation_provider(
+            package, make_investigation_provider())
+        return jsonify(package)
+
+    @application.get('/api/alerts/<int:alert_id>/timeline')
+    def api_alert_timeline(alert_id):
+        service = InvestigationService(db_file=application.config['DB_FILE'])
+        try:
+            package = service.build_investigation(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        return jsonify({
+            'alert_id': alert_id,
+            'correlation_id': package['alert'].get('correlation_id'),
+            'timeline': package['timeline'],
+        })
+
+    @application.get('/api/hunt')
+    def api_hunt():
+        filters = {key: value for key, value in request.args.items()
+                   if key not in ('limit', 'offset')}
+        try:
+            results = hunt(
+                filters,
+                db_file=application.config['DB_FILE'],
+                limit=request.args.get('limit', 100),
+                offset=request.args.get('offset', 0),
+            )
+        except HuntError as exc:
+            return jsonify(error='invalid_hunt_query', message=str(exc)), 400
+        return jsonify(results)
 
     @application.post('/api/ingest')
     def api_ingest():

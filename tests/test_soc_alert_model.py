@@ -113,25 +113,28 @@ def test_investigation_status_round_trip(api):
     process_event({'type': 'port_scan', 'src': '9.9.9.9', 'ports': [22]})
     alert_id = get_alerts(1, str(dbfile))[0]['id']
     headers = {'Authorization': 'Bearer ' + TOKEN}
+    # Phase 2 alias inputs remain accepted and canonicalize on storage.
     ok = client.post(f'/api/alerts/{alert_id}/status',
                      json={'status': 'in_progress'}, headers=headers)
     assert ok.status_code == 200
     alerts = client.get('/api/alerts').get_json()
-    assert alerts[0]['investigation_status'] == 'in_progress'
+    assert alerts[0]['investigation_status'] == 'investigating'
 
     closed = client.post(f'/api/alerts/{alert_id}/status',
                          json={'status': 'closed'}, headers=headers)
     assert closed.status_code == 200
+    alerts = client.get('/api/alerts').get_json()
+    assert alerts[0]['investigation_status'] == 'resolved'
 
     bad = client.post(f'/api/alerts/{alert_id}/status',
                       json={'status': 'bogus'}, headers=headers)
     assert bad.status_code == 400
     missing = client.post('/api/alerts/99999/status',
-                          json={'status': 'closed'}, headers=headers)
+                          json={'status': 'resolved'}, headers=headers)
     assert missing.status_code == 404
 
 
 def test_invalid_status_rejected_at_model_layer(soc_db):
     with pytest.raises(ValueError):
         set_investigation_status(1, 'nonsense', str(soc_db))
-    assert INVESTIGATION_STATUSES == ('new', 'in_progress', 'closed')
+    assert INVESTIGATION_STATUSES == ('new', 'investigating', 'resolved', 'dismissed')
