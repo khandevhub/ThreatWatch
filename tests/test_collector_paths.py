@@ -36,13 +36,13 @@ def test_sim_handler_processes_appends_end_to_end(tmp_path, monkeypatch):
     import detector
     detector.DB = str(dbfile)
     detector.bad_ips = {}
-    detector.failed_logins.clear()
-    detector.init_db()
+    detector.init_db(str(dbfile))
 
     # simulate watchdog delivering a Windows-separator absolute path even
     # though the watched path was constructed with forward slashes
     watched_mixed = str(logfile).replace('\\', '/')
-    handler = SimHandler(watched_mixed, tail=TailReader(watched_mixed))
+    handler = SimHandler(
+        watched_mixed, tail=TailReader(watched_mixed, str(dbfile)), db_file=str(dbfile))
     windows_style_event = type('E', (), {})()
     windows_style_event.src_path = str(logfile)          # backslashes
     windows_style_event.is_directory = False

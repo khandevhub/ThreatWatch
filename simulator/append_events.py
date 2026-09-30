@@ -1,62 +1,119 @@
-# simulator/append_events.py - shared logic for writing demo events
+"""Write demo events to the durable JSONL collector or protected API."""
 import argparse
+import ipaddress
 import json
 import os
 import sys
+import time
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 from . import catalog
+from security_config import SecretConfigurationError, load_ingest_token
 
 
-def write_jsonl(path, events=None):
-    """Write (or append) demo events to a JSONL file."""
+def _event_with_id(event):
+    result = dict(event)
+    result.setdefault('event_id', str(uuid4()))
+    return result
+
+
+def write_jsonl(path, events=None, delay=0.0):
+    """Append demo events, assigning a fresh stable ID to each written event."""
     events = events if events is not None else catalog.EVENTS
-    mode = 'a' if os.path.exists(path) else 'w'
-    with open(path, mode, encoding='utf-8') as f:
-        for e in events:
-            f.write(json.dumps(e) + "\n")
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    if os.path.exists(path) and os.path.getsize(path):
+        with open(path, 'rb') as existing:
+            existing.seek(-1, os.SEEK_END)
+            needs_separator = existing.read(1) != b'\n'
+        if needs_separator:
+            with open(path, 'ab') as existing:
+                existing.write(b'\n')
+
+    with open(path, 'a', encoding='utf-8', newline='') as stream:
+        for index, event in enumerate(events):
+            stream.write(json.dumps(_event_with_id(event)) + '\n')
+            stream.flush()
+            if delay and index + 1 < len(events):
+                time.sleep(delay)
+
+
+def _is_loopback_url(url):
+    parsed = urlsplit(url)
+    if not parsed.hostname:
+        return False
+    if parsed.scheme == 'https':
+        return True
+    if parsed.scheme != 'http':
+        return False
+    if parsed.hostname.lower() == 'localhost':
+        return True
+    try:
+        return ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        return False
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Write ThreatWatch demo events.")
+    parser = argparse.ArgumentParser(description='Write ThreatWatch demo events.')
     parser.add_argument('--target', choices=['file', 'ingest'], default='file',
-                        help="'file' writes simulated_logs.jsonl (default); "
-                             "'ingest' POSTs each event to the ingest endpoint.")
+                        help="'file' appends JSONL; 'ingest' POSTs to the protected API.")
     parser.add_argument('--out', default='simulated_logs.jsonl',
-                        help="Output JSONL path for --target file.")
+                        help='Output JSONL path for --target file.')
     parser.add_argument('--url', default='http://127.0.0.1:5000/api/ingest',
-                        help="Ingest endpoint URL for --target ingest.")
-    parser.add_argument('--token', default=os.environ.get('INGEST_TOKEN', ''),
-                        help="Bearer token for the ingest endpoint (or set INGEST_TOKEN).")
+                        help='Ingest endpoint URL for --target ingest.')
     parser.add_argument('--delay', type=float, default=0.0,
-                        help="Seconds to sleep between events.")
+                        help='Seconds to sleep between events.')
     args = parser.parse_args(argv)
 
+    if args.delay < 0:
+        parser.error('--delay must be non-negative')
     if args.target == 'file':
-        write_jsonl(args.out)
-        print("Wrote demo events to", args.out)
+        write_jsonl(args.out, delay=args.delay)
+        print('Wrote demo events to', args.out)
         return 0
+    try:
+        token = load_ingest_token()
+    except SecretConfigurationError as exc:
+        print('ingest token configuration error:', exc, file=sys.stderr)
+        return 2
+    if not token:
+        print('ingest mode requires INGEST_TOKEN or INGEST_TOKEN_FILE', file=sys.stderr)
+        return 2
+    if not _is_loopback_url(args.url):
+        print('refusing to send bearer token over non-local HTTP; use HTTPS', file=sys.stderr)
+        return 2
 
-    # ingest mode: POST each event to the running collector/app
     import urllib.request
+
+    class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, request, fp, code, msg, headers, new_url):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirectHandler)
     ok = fail = 0
-    for e in catalog.EVENTS:
+    for index, event in enumerate(catalog.EVENTS):
+        identified = _event_with_id(event)
         try:
-            data = json.dumps(e).encode('utf-8')
+            data = json.dumps(identified).encode('utf-8')
             req = urllib.request.Request(
                 args.url, data=data,
-                headers={'Content-Type': 'application/json', 'Accept': 'application/json'})
-            if args.token:
-                req.add_header('Authorization', 'Bearer ' + args.token)
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                resp.read()
+                headers={
+                    'Authorization': 'Bearer ' + token,
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                },
+            )
+            with opener.open(req, timeout=5) as response:
+                response.read()
             ok += 1
         except Exception as exc:
-            print("ingest failed for", e.get('type'), "->", exc, file=sys.stderr)
+            print('ingest failed for', event.get('type'), '->', type(exc).__name__, file=sys.stderr)
             fail += 1
-        if args.delay:
-            import time
+        if args.delay and index + 1 < len(catalog.EVENTS):
             time.sleep(args.delay)
-    print(f"Ingested {ok} events, {fail} failures")
+    print(f'Ingested {ok} events, {fail} failures')
     return 0 if fail == 0 else 1
 
 

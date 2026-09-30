@@ -1,7 +1,13 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
+
+COPY --from=ghcr.io/astral-sh/uv:0.12.17 /uv /uvx /bin/
 WORKDIR /app
-COPY . /app
-RUN pip install --no-cache-dir -r requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+COPY --chown=10001:10001 . /app
+RUN mkdir -p /data && chown 10001:10001 /data
+
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 EXPOSE 5000
-ENV FLASK_APP=app.py
-CMD ["python", "app.py"]
+USER 10001:10001
+CMD ["waitress-serve", "--listen=0.0.0.0:5000", "app:app"]

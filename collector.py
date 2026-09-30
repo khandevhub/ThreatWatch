@@ -1,167 +1,291 @@
-# collector.py - simulated-log collector with incremental tailing
-import os
-import time
+"""Durable JSONL collector with restart-safe byte cursors."""
+from dataclasses import dataclass
+import hashlib
 import json
 import logging
-from datetime import datetime
+import os
+import threading
+import time
 
-from detector import process_event, init_db
-from watchdog.observers import Observer
+from database import DB, get_file_cursor, init_db, record_ingestion_error, save_file_cursor
+from detector import process_event
+from event_model import EventValidationError, SecurityEvent
 from watchdog.events import FileSystemEventHandler
+from watchdog.observers import Observer
 
-LOGFILE_LINUX = os.environ.get('LOG_PATH', '/var/log/auth.log')
 SIM_FILE = os.environ.get('SIM_FILE', 'simulated_logs.jsonl')
+MAX_LINE_BYTES = 1024 * 1024
+BATCH_SIZE = 32
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
 logger = logging.getLogger('collector')
 
 
 def _norm(path):
-    """Normalize a path for comparison (separator- and case-safe on Windows)."""
     return os.path.normcase(os.path.normpath(path))
 
 
 def _path_matches(event_path, watched):
-    """True if event_path refers to the watched file, regardless of whether
-    absolute/relative or forward/backward separators were used."""
     ev, wt = _norm(event_path), _norm(watched)
     if ev == wt or ev.endswith(wt):
         return True
-    # mixed relative/absolute: resolve both against the current directory
-    # (the collector's cwd is the watched directory) and compare again
     return _norm(os.path.abspath(event_path)) == _norm(os.path.abspath(watched))
 
 
+@dataclass(frozen=True)
+class TailRecord:
+    source_path: str
+    file_identity: str
+    generation: int
+    start_offset: int
+    end_offset: int
+    raw: bytes
+    line_hash: str
+    event_id: str
+    oversized: bool = False
+    content_sha256: str = ''
+
+
 class TailReader:
-    """Incrementally reads appended lines from a text file.
+    """Read complete lines from the durable cursor, starting at byte zero."""
 
-    Remembers the byte offset after the last complete line and, on first
-    read of a small pre-existing file, keeps it entirely so the original
-    "auto-watch simulated file" convenience is preserved. For large
-    pre-existing files it seeks to the end (append-only convention).
-    """
+    def __init__(self, path, db_file=None):
+        self.path = os.path.abspath(path)
+        self.db_file = db_file or DB
+        init_db(self.db_file)
+        self._cursor = None
+        self._refresh_cursor()
 
-    def __init__(self, path, max_initial_read=1 * 1024 * 1024):
-        self.path = path
-        self._offset = None
-        self._mtime_ns = None
-        self._last_line = None
-        self._max_initial_read = max_initial_read
+    @staticmethod
+    def _identity(stat):
+        return f'{stat.st_dev}:{stat.st_ino}'
 
-    def _current_last_line(self):
-        """Best-effort read of the file's current final non-empty line."""
-        try:
-            size = os.path.getsize(self.path)
-            with open(self.path, 'rb') as f:
-                f.seek(max(0, size - 8192))
-                chunk = f.read().decode('utf-8', errors='replace')
-            lines = [l for l in chunk.splitlines() if l.strip()]
-            return lines[-1] if lines else None
-        except OSError:
+    def _hash_line_at(self, offset):
+        if offset <= 0:
             return None
+        start = max(0, offset - MAX_LINE_BYTES - 2)
+        with open(self.path, 'rb') as stream:
+            stream.seek(start)
+            data = stream.read(offset - start)
+        line = data[:-1] if data.endswith(b'\n') else data
+        if line.endswith(b'\r'):
+            line = line[:-1]
+        previous_newline = line.rfind(b'\n')
+        line = line[previous_newline + 1:][-MAX_LINE_BYTES:]
+        return hashlib.sha256(line).hexdigest()
 
-    def read_new_lines(self):
-        """Return newly appended lines since the last call."""
+    def _read_record(self, stream):
+        start = stream.tell()
+        preview = bytearray()
+        tail = bytearray()
+        digest = hashlib.sha256()
+        total = 0
+        terminated = False
+        while True:
+            chunk = stream.readline(64 * 1024)
+            if not chunk:
+                if total <= MAX_LINE_BYTES:
+                    stream.seek(start)
+                    return None
+                break
+            total += len(chunk)
+            digest.update(chunk)
+            if len(preview) < MAX_LINE_BYTES + 2:
+                preview.extend(chunk[:MAX_LINE_BYTES + 2 - len(preview)])
+            tail.extend(chunk)
+            if len(tail) > MAX_LINE_BYTES + 2:
+                del tail[:-MAX_LINE_BYTES - 2]
+            if chunk.endswith(b'\n'):
+                terminated = True
+                break
+
+        content_length = total - (1 if terminated else 0)
+        oversized = content_length > MAX_LINE_BYTES
+        raw = bytes(preview)
+        if terminated and raw.endswith(b'\n'):
+            raw = raw[:-1]
+        if terminated and raw.endswith(b'\r'):
+            raw = raw[:-1]
+        if oversized:
+            raw = raw[:MAX_LINE_BYTES]
+
+        hashed_line = bytes(tail)
+        if terminated and hashed_line.endswith(b'\n'):
+            hashed_line = hashed_line[:-1]
+        if terminated and hashed_line.endswith(b'\r'):
+            hashed_line = hashed_line[:-1]
+        line_hash = hashlib.sha256(hashed_line[-MAX_LINE_BYTES:]).hexdigest()
+        identity = self._cursor['file_identity']
+        generation = self._cursor['generation']
+        event_id = 'file:' + hashlib.sha256(
+            f'{self.path}\0{identity}\0{generation}\0{start}'.encode('utf-8')
+        ).hexdigest()
+        return TailRecord(
+            source_path=self.path,
+            file_identity=identity,
+            generation=generation,
+            start_offset=start,
+            end_offset=stream.tell(),
+            raw=raw,
+            line_hash=line_hash,
+            event_id=event_id,
+            oversized=oversized,
+            content_sha256=digest.hexdigest(),
+        )
+
+    def _refresh_cursor(self):
         try:
-            size = os.path.getsize(self.path)
-            mtime_ns = os.stat(self.path).st_mtime_ns
+            stat = os.stat(self.path)
         except OSError:
+            self._cursor = None
+            return
+
+        identity = self._identity(stat)
+        cursor = get_file_cursor(self.path, self.db_file)
+        if cursor is None:
+            cursor = {
+                'source_path': self.path,
+                'file_identity': identity,
+                'generation': 0,
+                'byte_offset': 0,
+                'last_line_hash': None,
+            }
+            save_file_cursor(cursor, self.db_file)
+        else:
+            offset = cursor['byte_offset']
+            changed = cursor['file_identity'] != identity or stat.st_size < offset
+            if not changed and offset and cursor['last_line_hash']:
+                changed = self._hash_line_at(offset) != cursor['last_line_hash']
+            if changed:
+                cursor = {
+                    'source_path': self.path,
+                    'file_identity': identity,
+                    'generation': cursor['generation'] + 1,
+                    'byte_offset': 0,
+                    'last_line_hash': None,
+                }
+                save_file_cursor(cursor, self.db_file)
+        self._cursor = cursor
+
+    def read_new_lines(self, max_lines=BATCH_SIZE):
+        """Return bounded batches of complete, unacknowledged lines."""
+        self._refresh_cursor()
+        if self._cursor is None or max_lines < 1:
             return []
-        if self._offset is None:
-            if size <= self._max_initial_read:
-                self._offset = 0          # keep small pre-existing file entirely
-            else:
-                self._offset = size       # seek to end for large pre-existing files
-                self._mtime_ns = mtime_ns
-                return []
-        elif size == self._offset and self._offset > 0 and (
-            self._mtime_ns is not None and mtime_ns != self._mtime_ns
-        ):
-            # Same size but mtime moved: either a harmless metadata touch or a
-            # same-length rewrite. Confirm by comparing the file's last line
-            # with the last line we processed; mtime alone proved unreliable
-            # (Windows fires extra events whose mtime bumps caused duplicate
-            # full-file re-reads).
-            if self._current_last_line() != self._last_line:
-                self._offset = 0          # rewritten in place: start over
-        self._mtime_ns = mtime_ns
         out = []
-        if size == self._offset:
-            return out
         try:
-            with open(self.path, 'r', encoding='utf-8', errors='replace') as f:
-                f.seek(self._offset)
-                while True:
-                    pos_before = f.tell()
-                    line = f.readline()
-                    if not line:
+            with open(self.path, 'rb') as stream:
+                stream.seek(self._cursor['byte_offset'])
+                while len(out) < max_lines:
+                    start = stream.tell()
+                    record = self._read_record(stream)
+                    if record is None:
                         break
-                    if not line.endswith('\n'):
-                        # incomplete final line: hold it back until completed
-                        f.seek(pos_before)
+                    if record.end_offset <= start:
                         break
-                    self._offset = f.tell()
-                    out.append(line.rstrip('\n'))
+                    out.append(record)
         except OSError as exc:
-            logger.warning('Tail read failed: %s', exc)
-        if out:
-            self._last_line = out[-1]
+            logger.warning('Tail read failed for %s: %s', self.path, exc)
         return out
+
+    def acknowledge(self, record):
+        """Persist progress only after the event or its rejection is stored."""
+        cursor = {
+            'source_path': record.source_path,
+            'file_identity': record.file_identity,
+            'generation': record.generation,
+            'byte_offset': record.end_offset,
+            'last_line_hash': record.line_hash,
+        }
+        save_file_cursor(cursor, self.db_file)
+        self._cursor = cursor
 
 
 class SimHandler(FileSystemEventHandler):
-    def __new__(cls, path, tail=None):
-        if tail is None:
-            tail = TailReader(path)
-        return super().__new__(cls)
+    def __init__(self, path, tail=None, db_file=None):
+        self.path = os.path.abspath(path)
+        self.db_file = db_file or DB
+        self.tail = tail or TailReader(self.path, self.db_file)
+        self._drain_lock = threading.Lock()
 
-    def __init__(self, path, tail=None):
-        self.path = path
-        if tail is None:
-            tail = TailReader(path)
-        self.tail = tail
-
-    def on_modified(self, event):
-        if getattr(event, 'is_directory', False):
-            return
-        if _path_matches(event.src_path, self.path):
-            logger.info('Detected change in simulated logs, processing...')
+    def _on_path_change(self, path, is_directory=False):
+        if not is_directory and _path_matches(path, self.path):
             self.drain()
 
+    def on_modified(self, event):
+        self._on_path_change(event.src_path, getattr(event, 'is_directory', False))
+
+    def on_created(self, event):
+        self._on_path_change(event.src_path, getattr(event, 'is_directory', False))
+
+    def on_moved(self, event):
+        self._on_path_change(getattr(event, 'dest_path', ''), getattr(event, 'is_directory', False))
+
     def drain(self):
-        lines = self.tail.read_new_lines()
-        for line in lines:
-            if not line.strip():
-                continue
-            try:
-                evt = json.loads(line)
-            except json.JSONDecodeError:
-                logger.warning('Skipping malformed JSON line: %r', line[:120])
-                continue
-            try:
-                if 'time' not in evt:
-                    evt['time'] = datetime.utcnow().isoformat()
-                process_event(evt)
-            except Exception:
-                logger.exception('Failed to process event line: %r', line[:120])
+        if not self._drain_lock.acquire(blocking=False):
+            return
+        try:
+            while True:
+                records = self.tail.read_new_lines()
+                if not records:
+                    break
+                for record in records:
+                    if not record.raw.strip():
+                        self.tail.acknowledge(record)
+                        continue
+                    try:
+                        if record.oversized:
+                            raise EventValidationError(
+                                f'JSONL record exceeds {MAX_LINE_BYTES} bytes')
+                        text = record.raw.decode('utf-8')
+                        payload = json.loads(text)
+                        event = SecurityEvent.from_payload(
+                            payload, default_source='jsonl', generated_event_id=record.event_id)
+                    except (UnicodeDecodeError, json.JSONDecodeError, EventValidationError) as exc:
+                        logger.warning('Quarantining malformed event at %s:%d: %s',
+                                       self.path, record.start_offset, exc)
+                        record_ingestion_error(record, exc, self.db_file)
+                        self.tail.acknowledge(record)
+                        continue
+                    try:
+                        process_event(event, db_file=self.db_file)
+                        self.tail.acknowledge(record)
+                    except Exception:
+                        logger.exception('Event processing failed at %s:%d; cursor retained',
+                                         self.path, record.start_offset)
+                        return
+                if len(records) < BATCH_SIZE:
+                    break
+        finally:
+            self._drain_lock.release()
 
 
-if __name__ == '__main__':
-    init_db()
-    if not os.path.exists(SIM_FILE):
+def run_collector(sim_file=SIM_FILE, db_file=DB):
+    init_db(db_file)
+    absolute_file = os.path.abspath(sim_file)
+    os.makedirs(os.path.dirname(absolute_file), exist_ok=True)
+    if not os.path.exists(absolute_file):
         from simulator.catalog import events_jsonl
-        with open(SIM_FILE, 'w', encoding='utf-8') as f:
-            f.write(events_jsonl())
-        logger.info('Wrote sample simulated file: %s', SIM_FILE)
-    tail = TailReader(SIM_FILE)
-    event_handler = SimHandler(SIM_FILE, tail)
+        with open(absolute_file, 'w', encoding='utf-8', newline='') as stream:
+            stream.write(events_jsonl())
+        logger.info('Wrote sample simulated file: %s', absolute_file)
+
+    tail = TailReader(absolute_file, db_file)
+    event_handler = SimHandler(absolute_file, tail, db_file)
     observer = Observer()
-    observer.schedule(event_handler, path='.', recursive=False)
+    observer.schedule(event_handler, path=os.path.dirname(absolute_file), recursive=False)
     observer.start()
-    logger.info('Watching %s for changes. Append events to this file to trigger processing.', SIM_FILE)
     try:
+        event_handler.drain()
+        logger.info('Watching %s; append JSONL events to ingest them.', absolute_file)
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
+        logger.info('Stopping collector.')
+    finally:
         observer.stop()
-    observer.join()
+        observer.join()
+
+
+if __name__ == '__main__':
+    run_collector()

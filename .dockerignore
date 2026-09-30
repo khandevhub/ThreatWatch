@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.py[cod]
+*.sqlite
+*.sqlite-*
+*.db
+.env
+.env.*
+simulated_logs.jsonl
+screenshots
+demo
+tests

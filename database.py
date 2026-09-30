@@ -1,0 +1,217 @@
+"""SQLite schema, connection policy, and durable collector state."""
+from contextlib import contextmanager
+from datetime import datetime, timezone
+import hashlib
+import os
+import sqlite3
+import time
+
+DB = os.environ.get('DB_FILE', 'db.sqlite')
+SCHEMA_VERSION = 1
+
+
+class EventIdConflictError(ValueError):
+    """An event ID was reused for a different normalized event."""
+
+
+def utc_now():
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+
+@contextmanager
+def connect(db_file=None):
+    connection = sqlite3.connect(db_file or DB, timeout=10)
+    connection.row_factory = sqlite3.Row
+    connection.execute('PRAGMA foreign_keys = ON')
+    connection.execute('PRAGMA busy_timeout = 10000')
+    try:
+        yield connection
+    finally:
+        connection.close()
+
+
+def _enable_wal(connection):
+    deadline = time.monotonic() + 10
+    delay = 0.01
+    while True:
+        try:
+            mode = connection.execute('PRAGMA journal_mode = WAL').fetchone()[0]
+            if mode.lower() != 'wal':
+                raise RuntimeError(f'Unable to enable SQLite WAL mode: {mode}')
+            return
+        except sqlite3.OperationalError as exc:
+            if 'locked' not in str(exc).lower() or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 0.25)
+
+
+def init_db(db_file=None):
+    """Create or upgrade the schema in one transaction; safe to call repeatedly."""
+    with connect(db_file) as connection:
+        _enable_wal(connection)
+        connection.execute('PRAGMA synchronous = FULL')
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            version = connection.execute('PRAGMA user_version').fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f'Database schema {version} is newer than supported {SCHEMA_VERSION}')
+
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+                    event_time TEXT NOT NULL,
+                    ingestion_time TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    host TEXT,
+                    user_name TEXT,
+                    src_ip TEXT,
+                    dst_ip TEXT,
+                    src_port INTEGER CHECK (src_port IS NULL OR src_port BETWEEN 1 AND 65535),
+                    dst_port INTEGER CHECK (dst_port IS NULL OR dst_port BETWEEN 1 AND 65535),
+                    event_type TEXT NOT NULL,
+                    action TEXT,
+                    outcome TEXT,
+                    process TEXT,
+                    command_line TEXT,
+                    domain TEXT,
+                    url TEXT,
+                    file_hash TEXT,
+                    metadata_json TEXT NOT NULL
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    time TEXT NOT NULL,
+                    rule TEXT NOT NULL,
+                    severity TEXT NOT NULL CHECK (severity IN ('HIGH', 'MEDIUM', 'LOW')),
+                    details TEXT NOT NULL,
+                    event_id TEXT REFERENCES events(event_id) ON DELETE SET NULL
+                )
+            ''')
+            alert_columns = {
+                row['name'] for row in connection.execute('PRAGMA table_info(alerts)')
+            }
+            if 'event_id' not in alert_columns:
+                connection.execute(
+                    'ALTER TABLE alerts ADD COLUMN event_id TEXT REFERENCES events(event_id) ON DELETE SET NULL')
+
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS alert_enrichment (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    alert_id INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    UNIQUE (alert_id, key)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS file_cursors (
+                    source_path TEXT PRIMARY KEY,
+                    file_identity TEXT NOT NULL,
+                    generation INTEGER NOT NULL CHECK (generation >= 0),
+                    byte_offset INTEGER NOT NULL CHECK (byte_offset >= 0),
+                    last_line_hash TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS ingestion_errors (
+                    source_path TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    error TEXT NOT NULL,
+                    preview TEXT NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    PRIMARY KEY (source_path, generation, start_offset)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS failed_login_attempts (
+                    event_id TEXT PRIMARY KEY REFERENCES events(event_id) ON DELETE CASCADE,
+                    source_ip TEXT NOT NULL,
+                    event_time TEXT NOT NULL
+                )
+            ''')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_time ON alerts(time DESC, id DESC)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_alerts_rule ON alerts(rule, id DESC)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_events_time_type ON events(event_time, event_type)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_events_source_ip_time ON events(src_ip, event_time)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_enrichment_alert ON alert_enrichment(alert_id)')
+            connection.execute('CREATE INDEX IF NOT EXISTS idx_failed_login_window ON failed_login_attempts(source_ip, event_time)')
+            connection.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def get_file_cursor(source_path, db_file=None):
+    with connect(db_file) as connection:
+        row = connection.execute(
+            'SELECT source_path, file_identity, generation, byte_offset, last_line_hash '
+            'FROM file_cursors WHERE source_path = ?', (source_path,)).fetchone()
+        return dict(row) if row else None
+
+
+def _save_file_cursor(connection, cursor):
+    connection.execute('''
+        INSERT INTO file_cursors
+            (source_path, file_identity, generation, byte_offset, last_line_hash, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_path) DO UPDATE SET
+            file_identity = excluded.file_identity,
+            generation = excluded.generation,
+            byte_offset = excluded.byte_offset,
+            last_line_hash = excluded.last_line_hash,
+            updated_at = excluded.updated_at
+    ''', (
+        cursor['source_path'], cursor['file_identity'], cursor['generation'],
+        cursor['byte_offset'], cursor.get('last_line_hash'), utc_now(),
+    ))
+
+
+def save_file_cursor(cursor, db_file=None):
+    with connect(db_file) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            _save_file_cursor(connection, cursor)
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+
+def record_ingestion_error(record, error, db_file=None):
+    raw = record.raw
+    with connect(db_file) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        try:
+            connection.execute('''
+                INSERT OR IGNORE INTO ingestion_errors
+                    (source_path, generation, start_offset, end_offset, recorded_at,
+                     error, preview, content_sha256)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                record.source_path, record.generation, record.start_offset,
+                record.end_offset, utc_now(), str(error)[:512],
+                raw[:256].decode('utf-8', errors='replace'),
+                record.content_sha256 or hashlib.sha256(raw).hexdigest(),
+            ))
+            _save_file_cursor(connection, {
+                'source_path': record.source_path,
+                'file_identity': record.file_identity,
+                'generation': record.generation,
+                'byte_offset': record.end_offset,
+                'last_line_hash': record.line_hash,
+            })
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise

@@ -17,10 +17,8 @@ def detector(tmp_path, monkeypatch):
     # leak the repo CSV/DB into every test)
     detector_module.DB = str(dbfile)
     detector_module.bad_ips = detector_module.load_threat_intel(str(intel))
-    detector_module.failed_logins.clear()
-    detector_module.init_db()
+    detector_module.init_db(str(dbfile))
     yield detector_module
-    detector_module.failed_logins.clear()
 
 
 def _alerts_and_enrichment(dbfile):

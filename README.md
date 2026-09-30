@@ -1,144 +1,128 @@
 # ThreatWatch — Mini SOC
 
-A small, self-contained security-monitoring demo: a log-file collector feeds
-events to a tiny detection engine, alerts are stored in SQLite, and a web
-dashboard shows live alerts with severity counters and a per-rule chart.
+A local security-monitoring demo: JSONL or authenticated HTTP events are normalized, processed by deterministic demo rules, stored in SQLite, and shown in a Flask dashboard. This remains a simulated-data foundation; it does not collect real operating-system, endpoint, network, DNS, web, PowerShell, or cloud logs.
 
-## What ThreatWatch does today
+## Requirements and reproducible setup
 
-- **Collector** (`collector.py`): watches `simulated_logs.jsonl` and processes
-  each newly appended JSON line. Uses an incremental tail reader so appends are
-  processed exactly once (no full-file reprocessing / duplicate alerts).
-- **Detector** (`detector.py`): applies the detection rules below and writes
-  alerts to SQLite (`db.sqlite` by default), with structured enrichment rows
-  (`alert_enrichment` table).
-- **Threat intel**: `threat_intel.csv` (header `ip,tag`) is loaded at startup;
-  events from listed IPs get a `[KNOWN_SCANNER]`-style note in the alert
-  details and a `known_threat=true` enrichment row.
-- **Dashboard** (`app.py` + `templates/dashboard.html`): Flask app serving a
-  single page that polls `/api/alerts` and `/api/summary` every 1.5 s, with
-  severity counters, a severity filter, and a Chart.js bar chart. Alert text is
-  rendered with safe DOM APIs (no HTML injection).
-- **Simulator**: demo events for testing the whole pipeline
-  (see *Running the demo*).
+ThreatWatch supports Python 3.12 and 3.13 (`>=3.12,<3.14`). Use [uv](https://docs.astral.sh/uv/) to install the exact dependency graph in `uv.lock`, including test tools:
 
-## Current detection rules
+```bash
+uv python install 3.12
+uv sync --locked --group dev
+uv run python -m pytest -q
+```
+
+`pyproject.toml` defines runtime and development dependencies; `uv.lock` is the reproducible environment lock. `requirements.txt` is the pinned runtime-only pip manifest; `requirements-dev.txt` adds test/audit tools for pip-based environments.
+
+## Local demo
+
+Use two terminals from the repository root:
+
+```bash
+uv run python collector.py
+uv run python app.py
+```
+
+The dashboard is available at http://127.0.0.1:5000. The collector creates `simulated_logs.jsonl` with the demo catalog on first run and durably processes complete JSONL lines. Existing file content is processed from the beginning on first use; its SQLite cursor prevents replay after a restart. File rotation, truncation, and a changed last processed line start a new file generation. Malformed file records are recorded in `ingestion_errors` before advancing the cursor.
+
+Append demo events with any of these:
+
+```bash
+uv run python simulate_attacks.py
+uv run python simulate_attacks.py --out mylog.jsonl
+uv run python simulate_attacks.py --delay 0.5
+```
+
+Windows users can run `simulate_attack_windows.bat`; Linux/macOS users can run `./simulate_attacks.sh`. Both use the shared Python simulator and append events.
+
+## Authenticated HTTP ingestion
+
+`POST /api/ingest` accepts one JSON event per request. Configure a random token of at least 32 characters in both the API and simulator environment. For example:
+
+```bash
+# PowerShell
+$env:INGEST_TOKEN = (python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# Bash
+export INGEST_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+```
+
+Start the API in one terminal:
+
+```bash
+uv run python app.py
+```
+
+In a second terminal, set the same token and send the catalog:
+
+```bash
+uv run python simulate_attacks.py --target ingest
+```
+
+The client sends `Authorization: Bearer <token>`. Tokens may be supplied using `INGEST_TOKEN` or `INGEST_TOKEN_FILE`; configure only one. A missing token disables ingestion with HTTP 503. Invalid/missing credentials return 401, invalid JSON/events return 400, non-JSON content returns 415, payloads above 1 MiB return 413, and the local in-memory ingest limit returns 429. Use HTTPS for non-loopback destinations; the demo client refuses to send bearer tokens over non-local HTTP.
+
+Every API event must include a stable `event_id`; this lets the server distinguish a retry from a new, identical event. Replaying an identical ID returns a duplicate response; reusing it for different event data returns HTTP 409. The legacy JSONL adapter generates IDs from file identity, generation, and byte offset.
+
+## Event contract
+
+The current version is `schema_version: 1`. `event_type` is required. The HTTP API requires `event_id`; the legacy file adapter generates one, and `source` defaults to the adapter. `event_time` accepts ISO-8601 timestamps and legacy `time`; naive timestamps are interpreted as UTC. `ingestion_time` is always assigned by the server. IPs and ports are validated and IPs canonicalized. Unknown fields, unsupported versions, invalid timestamps, invalid addresses, and malformed metadata are rejected.
+
+The model includes `source_type`, `host`, `user`, `src_ip`, `dst_ip`, `src_port`, `dst_port`, `event_type`, `action`, `outcome`, `process`, `command_line`, `domain`, `url`, `file_hash`, and `metadata`. Source families include authentication, process, network, DNS, web, PowerShell, endpoint, and cloud identity. These are schema capabilities, not implemented collectors or detections.
+
+Legacy simulator input remains supported: `type`, `time`, `src`, `ports`, `bytes`, and `message` are normalized; current `auth_failed`, `port_scan`, and `traffic_spike` rules remain unchanged in scope. Event insertion, deduplication, temporal failed-login state, alert creation, and enrichment use SQLite transactions. SQLite schema setup and upgrades use one `database.init_db()` path and `PRAGMA user_version`.
+
+## Docker Compose
+
+Docker Compose runs the dashboard and collector as separate non-root services sharing a persistent SQLite/input volume. The published dashboard port is bound to host loopback only. Docker access requires an `INGEST_TOKEN` in the host environment:
+
+```bash
+# Set INGEST_TOKEN using one of the commands above, then:
+docker compose up --build
+```
+
+Open http://127.0.0.1:5000. To send events from the host, set the same token in the simulator environment and run `uv run python simulate_attacks.py --target ingest`. Stop with `docker compose down`; data remains in the named `threatwatch-data` volume. `docker compose down -v` deletes that volume and its data.
+
+The dashboard and read-only alert APIs are intentionally a local demo boundary, not an internet-facing deployment. Do not bind or proxy them publicly without adding user authentication/authorization and TLS. The ingestion endpoint itself is bearer-token protected.
+
+## Existing detections
 
 | Rule | Event type | Trigger | Severity |
 |---|---|---|---|
-| `BRUTE_FORCE` | `auth_failed` | >= 5 failed logins from the same source IP within 60 s | HIGH |
-| `PORT_SCAN` | `port_scan` | any `port_scan` event (list of ports included) | MEDIUM |
-| `TRAFFIC_SPIKE` | `traffic_spike` | any `traffic_spike` event (byte count included) | LOW |
+| `BRUTE_FORCE` | `auth_failed` | At least 5 failures from the same source IP within 60 seconds by default | HIGH |
+| `PORT_SCAN` | `port_scan` | Any supplied `port_scan` event | MEDIUM |
+| `TRAFFIC_SPIKE` | `traffic_spike` | Any supplied `traffic_spike` event | LOW |
 
-Known-IP enrichment applies to all three rules. Counters/window/threshold are
-configurable via environment variables (below).
+Known-IP enrichment is loaded from `threat_intel.csv` at startup. These rules consume normalized/simulator events; real source collection and broader detection are not implemented.
 
-## Installation
-
-Requires Python 3.8+ (tested on 3.10).
-
-```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## Running it
-
-1. **Start the detector+collector** (creates the DB and a sample event file on
-   first run):
-
-   ```bash
-   python collector.py
-   ```
-
-2. **Start the dashboard** (in a second terminal):
-
-   ```bash
-   python app.py
-   ```
-
-   Then open http://127.0.0.1:5000
-
-3. **Feed demo events**:
-
-   - Windows: double-click `simulate_attack_windows.bat` (or run it from a
-     shell) — it calls `python simulate_attacks.py`.
-   - Linux/macOS: `./simulate_attacks.sh` (Bash version, same output).
-   - Cross-platform CLI:
-
-     ```bash
-     python simulate_attacks.py                       # append to simulated_logs.jsonl
-     python simulate_attacks.py --out mylog.jsonl     # custom output file
-     python simulate_attacks.py --delay 0.5           # slower stream
-     ```
-
-The collector tail-watches the file, so appended events appear on the
-dashboard within ~1.5 seconds. `db.sqlite` and `simulated_logs.jsonl` are
-runtime artifacts and are gitignored.
-
-### Docker
-
-```bash
-docker build -t threatwatch .
-docker run -p 5000:5000 threatwatch
-```
-
-## How to run tests
-
-```bash
-python -m pytest -v
-```
-
-The suite covers the detector rules, known-IP enrichment, the alert DB API,
-and the collector's tail reader (append/truncate handling, duplicate
-processing regression).
-
-## Configuration (environment variables)
+## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `DB_FILE` | `db.sqlite` | SQLite database path |
-| `DETECTION_WINDOW` | `60` | Brute-force window (seconds) |
-| `BRUTE_FORCE_THRESHOLD` | `5` | Failed logins before a brute-force alert |
-| `THREAT_INTEL` | `threat_intel.csv` | Threat-intel CSV path (`ip,tag`) |
-| `SIM_FILE` | `simulated_logs.jsonl` | File the collector watches |
-| `LOG_PATH` | `/var/log/auth.log` | Placeholder for future real-log ingestion |
+| `SIM_FILE` | `simulated_logs.jsonl` | JSONL file watched by the collector |
+| `THREAT_INTEL` | `threat_intel.csv` | Demo `ip,tag` CSV |
+| `DETECTION_WINDOW` | `60` | Brute-force window in seconds; positive integer |
+| `BRUTE_FORCE_THRESHOLD` | `5` | Failed-logins threshold; positive integer |
+| `INGEST_TOKEN` | unset | Bearer token; at least 32 characters when set |
+| `INGEST_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `INGEST_TOKEN` |
+| `PORT` | `5000` | Local Waitress port when running `python app.py` |
 
-## Project structure
+## Tests and project layout
 
-```
-ThreatWatch/
-├── app.py                     Flask dashboard + JSON API
-├── collector.py               watchdog-based collector, incremental tailing
-├── detector.py                detection rules, SQLite alert store, enrichment
-├── threat_intel.csv           known threat IPs (ip,tag)
-├── simulate_attacks.py        cross-platform demo event writer (entry point)
-├── simulate_attacks.sh        Bash wrapper (Unix)
-├── simulate_attack_windows.bat Windows wrapper
-├── simulator/
-│   ├── catalog.py             shared demo event set
-│   └── append_events.py       file-append / HTTP-ingest writer logic
-├── templates/dashboard.html   dashboard UI (DOM-safe rendering)
-├── static/style.css           dashboard styles
-├── tests/                     pytest suite
-├── requirements.txt           pinned dependencies
-├── Dockerfile                 container image
-└── db.sqlite                  (runtime, gitignored)
+```bash
+uv run --locked --group dev python -m pytest -q
+uv run --locked --group dev pip-audit
 ```
 
-## Known limitations
+The suite covers event validation, database creation/migration, restart-safe collection and deduplication, the current deterministic rules and threat-intel enrichment, API authentication/errors, simulator/API end-to-end behavior, dashboard safety, and path handling.
 
-- **No authentication/authorization** on the dashboard or API; anyone who can
-  reach the port can read alerts. Bind it to localhost for demos.
-- **Development server**: `app.py` runs Flask's built-in server with debug
-  mode disabled; it is not a production WSGI deployment.
-- **Simulated ingestion only**: despite `LOG_PATH`, real syslog/auth.log
-  parsing is not implemented; events are JSON lines you append (or POST).
-- **State is per-process**: brute-force counters live in the detector's memory
-  and reset on restart; the collector must run in the same process family as
-  the detector (it imports it).
-- `TRAFFIC_SPIKE` fires on the event type alone (no baseline/threshold logic).
-- No deduplication/aggregation across alerts, no case management, no
-  retention policy, no HTTPS/TLS termination.
-- Threat intel is a static CSV with no source/age/confidence metadata.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema and durable cursors), `collector.py` (JSONL tail and quarantine), `detector.py` (existing rules), `app.py` (dashboard API and protected ingestion), `simulator/` (catalog/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+
+## Current limitations
+
+- Only simulator/JSONL events and authenticated event POSTs are ingested; real log parsing is not implemented.
+- Detection rules remain the three existing demo rules. Traffic spikes still fire on event type, not a measured baseline.
+- Threat intelligence remains a small static IP/tag CSV without feed lifecycle, confidence, source history, or expiry.
+- Dashboard and read-only alert APIs have no user accounts/RBAC; keep them on loopback or add an authenticated access layer before any remote exposure.
+- SQLite and the in-process rate limiter are for a single local deployment, not a multi-node service.
+- No incidents/cases, ATT&CK, Sigma, anomaly/ML, RAG/LLM, or response automation are included in this foundation phase.

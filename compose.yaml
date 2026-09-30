@@ -1,0 +1,48 @@
+services:
+  dashboard:
+    build: .
+    command: ["waitress-serve", "--listen=0.0.0.0:5000", "app:app"]
+    environment:
+      DB_FILE: /data/db.sqlite
+      INGEST_TOKEN: ${INGEST_TOKEN:?Set_INGEST_TOKEN_before_starting}
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - threatwatch-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/api/health', timeout=2)"
+      interval: 15s
+      timeout: 3s
+      retries: 3
+
+  collector:
+    build: .
+    command: ["python", "collector.py"]
+    environment:
+      DB_FILE: /data/db.sqlite
+      SIM_FILE: /data/simulated_logs.jsonl
+      THREAT_INTEL: /app/threat_intel.csv
+    volumes:
+      - threatwatch-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+volumes:
+  threatwatch-data:

@@ -1,9 +1,5 @@
-"""Detector tests.
-
-The original test set DB_FILE after the detector module had already been
-imported (module-level constant), so the temp path never took effect. These
-tests set the environment first and import the module afterwards.
-"""
+"""Existing detector behavior and persisted-state regression tests."""
+import importlib
 import os
 import sqlite3
 
@@ -14,17 +10,12 @@ import pytest
 def detector(tmp_path, monkeypatch):
     dbfile = tmp_path / 'test_db.sqlite'
     monkeypatch.setenv('DB_FILE', str(dbfile))
-    monkeypatch.setenv('THREAT_INTEL', str(tmp_path / 'intel.csv'))  # empty by default
+    monkeypatch.setenv('THREAT_INTEL', str(tmp_path / 'intel.csv'))
     import detector
-    # detector reads DB_FILE/THREAT_INTEL into module constants at import;
-    # bind them explicitly so each test gets its own db and empty intel set.
     detector.DB = str(dbfile)
     detector.bad_ips = {}
-    detector.failed_logins.clear()  # isolate sliding-window state between tests
-    detector.init_db()
+    detector.init_db(str(dbfile))
     yield detector
-    detector.failed_logins.clear()
-
 
 def _alert_count(dbfile):
     conn = sqlite3.connect(str(dbfile))
@@ -94,3 +85,42 @@ def test_traffic_spike_alert(detector, tmp_path):
 def test_unknown_event_type_is_ignored(detector, tmp_path):
     detector.process_event({'type': 'something_else'})
     assert _alert_count(tmp_path / 'test_db.sqlite') == 0
+
+
+def test_bruteforce_uses_event_time_window(detector, tmp_path):
+    attempts = [
+        '2025-01-01T00:00:00Z',
+        '2025-01-01T00:00:01Z',
+        '2025-01-01T00:00:02Z',
+        '2025-01-01T00:00:03Z',
+    ]
+    for event_time in attempts:
+        detector.process_event({
+            'type': 'auth_failed', 'src': '1.2.3.4', 'event_time': event_time,
+        })
+    detector.process_event({
+        'type': 'auth_failed', 'src': '1.2.3.4',
+        'event_time': '2025-01-01T00:01:01Z',
+    })
+    assert _alert_count(tmp_path / 'test_db.sqlite') == 0
+
+
+def test_bruteforce_window_survives_detector_restart(detector, tmp_path):
+    for _ in range(4):
+        detector.process_event({'type': 'auth_failed', 'src': '1.2.3.4'})
+
+    restarted_detector = importlib.reload(detector)
+    restarted_detector.DB = str(tmp_path / 'test_db.sqlite')
+    restarted_detector.bad_ips = {}
+    restarted_detector.process_event({'type': 'auth_failed', 'src': '1.2.3.4'})
+
+    assert _alert_count(tmp_path / 'test_db.sqlite') == 1
+
+
+def test_replayed_event_id_does_not_increment_bruteforce_count(detector, tmp_path):
+    for _ in range(4):
+        detector.process_event({'type': 'auth_failed', 'src': '1.2.3.4'})
+    repeated = {'event_id': 'stable-event-id', 'type': 'auth_failed', 'src': '1.2.3.4'}
+    assert detector.process_event(repeated) is True
+    assert detector.process_event(repeated) is False
+    assert _alert_count(tmp_path / 'test_db.sqlite') == 1

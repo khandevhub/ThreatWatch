@@ -6,19 +6,21 @@ import pytest
 import app as app_module
 from app import app
 
+TEST_TOKEN = 'unit-test-' + 'x' * 48
+
 
 @pytest.fixture()
-def api_client(tmp_path, monkeypatch):
+def api_client(tmp_path):
     dbfile = tmp_path / 'test_db.sqlite'
-    monkeypatch.setenv('DB_FILE', str(dbfile))
-    # app reads DB_FILE into a module constant at import; bind it explicitly
-    # so the endpoints hit this test's database.
-    app_module.DB = str(dbfile)
-    conn = sqlite3.connect(str(dbfile))
-    try:
-        conn.execute(
-            'CREATE TABLE alerts (id INTEGER PRIMARY KEY AUTOINCREMENT, time TEXT, '
-            'rule TEXT, severity TEXT, details TEXT)')
+    app.config.update(
+        DB_FILE=str(dbfile),
+        INGEST_TOKEN=TEST_TOKEN,
+        TESTING=True,
+        MAX_CONTENT_LENGTH=app_module.MAX_CONTENT_LENGTH,
+    )
+    app.extensions['ingest_rate_limiter'] = app_module.IngestRateLimiter()
+    app_module.init_db(str(dbfile))
+    with sqlite3.connect(str(dbfile)) as conn:
         conn.executemany(
             'INSERT INTO alerts (time, rule, severity, details) VALUES (?, ?, ?, ?)',
             [
@@ -26,26 +28,27 @@ def api_client(tmp_path, monkeypatch):
                  'Multiple failed logins from 1.2.3.4: 5 attempts [KNOWN_SCANNER]'),
                 ('2025-01-01T10:00:05', 'PORT_SCAN', 'MEDIUM',
                  'Port scan detected from 9.9.9.9 - ports: [22, 80]'),
-            ])
-        conn.commit()
-    finally:
-        conn.close()
-    app.config['TESTING'] = True
+            ],
+        )
     with app.test_client() as client:
         yield client, dbfile
 
 
-def test_index_page_serves(api_client):
+def test_index_page_serves_with_security_headers(api_client):
     client, _ = api_client
-    resp = client.get('/')
-    assert resp.status_code == 200
-    assert b'ThreatWatch' in resp.data
+    response = client.get('/')
+    assert response.status_code == 200
+    assert b'ThreatWatch' in response.data
+    assert response.headers['X-Content-Type-Options'] == 'nosniff'
+    assert response.headers['X-Frame-Options'] == 'DENY'
+    assert "default-src 'self'" in response.headers['Content-Security-Policy']
 
 
 def test_alerts_endpoint_returns_rows(api_client):
     client, dbfile = api_client
     resp = client.get('/api/alerts')
     assert resp.status_code == 200
+    assert resp.headers['Cache-Control'] == 'no-store'
     data = resp.get_json()
     assert len(data) == 2
     first = data[0]  # newest first
