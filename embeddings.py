@@ -14,21 +14,38 @@ Providers:
 - ``MockEmbeddingProvider`` ("mock"): tiny deterministic unit vectors keyed by
   a fixed word vocabulary, designed so tests can assert exact cosine values.
 - ``DisabledEmbeddingProvider`` ("disabled"): the default; embeds nothing.
+- ``SemanticEmbeddingProvider`` ("local-semantic", optional): a genuine
+  sentence-embedding model via the optional ``fastembed`` package (ONNX, CPU,
+  quantized). Requires ``uv sync --extra semantic``; unavailable otherwise.
 """
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import os
 import re
+import threading
 
 PROVIDER_HASHING = 'local-hash'
 PROVIDER_NAME_MOCK = 'mock'
 PROVIDER_NAME_DISABLED = 'disabled'
+PROVIDER_SEMANTIC = 'local-semantic'
+
+logger = logging.getLogger('threatwatch.embeddings')
+
+# Optional semantic-embedding defaults (fastembed, ONNX CPU).
+SEMANTIC_DEFAULT_MODEL = 'BAAI/bge-small-en-v1.5'
+SEMANTIC_DEFAULT_DIMENSIONS = 384
+
+# Process-wide model cache: one loaded model per name, reused across calls.
+_SEMANTIC_MODEL_CACHE = {}
+_SEMANTIC_CACHE_LOCK = threading.Lock()
 # "local" selects the default offline implementation; the concrete provider is
 # local-hash unless LOCAL_EMBEDDING_PROVIDER names another offline one.
 PROVIDER_NAME_LOCAL = 'local'
-LOCAL_PROVIDER_REGISTRY = (PROVIDER_HASHING,)
+# Concrete offline providers selectable via LOCAL_EMBEDDING_PROVIDER.
+LOCAL_PROVIDER_REGISTRY = (PROVIDER_HASHING, PROVIDER_SEMANTIC)
 
 DEFAULT_DIMENSIONS = 256
 MIN_DIMENSIONS = 8
@@ -244,6 +261,93 @@ class DisabledEmbeddingProvider(EmbeddingProvider):
         raise EmbeddingError('embedding provider is disabled')
 
 
+class SemanticEmbeddingProvider(EmbeddingProvider):
+    """Genuine sentence embeddings via the optional ``fastembed`` package.
+
+    Runs a real transformer model on CPU through ONNX Runtime; the model is
+    downloaded once on first use (~130 MB for the default) and then cached on
+    disk. The model instance is loaded lazily and reused process-wide.
+
+    Attributes:
+        model_name: fastembed-supported model identifier (e.g.
+            ``BAAI/bge-small-en-v1.5``).
+        dimensions: expected output dimensionality; vectors are validated
+            against it on every call.
+    """
+
+    name = PROVIDER_SEMANTIC
+
+    def __init__(self, model_name=SEMANTIC_DEFAULT_MODEL,
+                 dimensions=SEMANTIC_DEFAULT_DIMENSIONS):
+        self.model_name = str(model_name or SEMANTIC_DEFAULT_MODEL)
+        self.dimensions = self._coerce_dimension(dimensions)
+        self._available = None  # probed once, lazily
+
+    def available(self):
+        if self._available is None:
+            try:
+                import fastembed  # noqa: F401
+                self._available = True
+            except ImportError:
+                self._available = False
+        return self._available
+
+    def describe(self):
+        return {
+            'provider': self.name,
+            'model': self.model_name,
+            'dimensions': self.dimensions,
+        }
+
+    def _model(self):
+        """Return the process-wide cached model, loading it on first use."""
+        with _SEMANTIC_CACHE_LOCK:
+            cached = _SEMANTIC_MODEL_CACHE.get(self.model_name)
+            if cached is None:
+                from fastembed import TextEmbedding
+                cached = TextEmbedding(model_name=self.model_name)
+                _SEMANTIC_MODEL_CACHE[self.model_name] = cached
+            return cached
+
+    def _validate_vectors(self, vectors, expected_count):
+        if len(vectors) != expected_count:
+            raise EmbeddingError(
+                f'embedding model returned {len(vectors)} vectors; '
+                f'expected {expected_count}')
+        cleaned = []
+        for vector in vectors:
+            values = [float(component) for component in vector]
+            if len(values) != self.dimensions:
+                raise EmbeddingError(
+                    f'embedding model returned {len(values)} dimensions; '
+                    f'configured model dimension is {self.dimensions}')
+            if any(math.isnan(value) or math.isinf(value) for value in values):
+                raise EmbeddingError('embedding model returned non-finite values')
+            cleaned.append(values)
+        return cleaned
+
+    def embed_text(self, text):
+        self._validate_text(text)
+        return self.embed_many([text])[0]
+
+    def embed_many(self, texts):
+        self._validate_batch(texts)
+        if not self.available():
+            raise EmbeddingError(
+                'semantic embeddings require the optional fastembed package '
+                '(uv sync --extra semantic)')
+        if not texts:
+            return []
+        model = self._model()
+        try:
+            raw = [vector.tolist() if hasattr(vector, 'tolist') else list(vector)
+                   for vector in model.embed(list(texts))]
+        except Exception as exc:
+            logger.warning('Semantic embedding failed (%s)', type(exc).__name__)
+            raise EmbeddingError(f'semantic embedding failed: {type(exc).__name__}') from None
+        return self._validate_vectors(raw, len(texts))
+
+
 def _env_flag(environ, name, default=False):
     value = environ.get(name)
     if value is None or value == '':
@@ -268,9 +372,19 @@ def make_embedding_provider(environ=None):
         if requested not in LOCAL_PROVIDER_REGISTRY:
             raise EmbeddingError(
                 f'unknown LOCAL_EMBEDDING_PROVIDER: {requested}')
+        if requested == PROVIDER_SEMANTIC:
+            return SemanticEmbeddingProvider(
+                model_name=environ.get('EMBEDDING_MODEL') or SEMANTIC_DEFAULT_MODEL,
+                dimensions=environ.get('EMBEDDING_DIMENSIONS')
+                or SEMANTIC_DEFAULT_DIMENSIONS)
     if requested == PROVIDER_HASHING:
         return HashingEmbeddingProvider(
             dimensions=environ.get('EMBEDDING_DIMENSIONS') or DEFAULT_DIMENSIONS)
+    if requested == PROVIDER_SEMANTIC:
+        return SemanticEmbeddingProvider(
+            model_name=environ.get('EMBEDDING_MODEL') or SEMANTIC_DEFAULT_MODEL,
+            dimensions=environ.get('EMBEDDING_DIMENSIONS')
+            or SEMANTIC_DEFAULT_DIMENSIONS)
     if requested == PROVIDER_NAME_MOCK:
         return MockEmbeddingProvider()
     raise EmbeddingError(f'unknown EMBEDDING_PROVIDER: {requested}')

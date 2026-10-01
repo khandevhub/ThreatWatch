@@ -16,5 +16,12 @@ dev = [
     "pip-audit==2.10.1",
 ]
 
+[project.optional-dependencies]
+# Optional real semantic embeddings (Phase 4E): ONNX CPU inference, no GPU.
+# First use downloads the model once (~130 MB for BAAI/bge-small-en-v1.5).
+semantic = [
+    "fastembed>=0.3,<2",
+]
+
 [tool.uv]
 package = false

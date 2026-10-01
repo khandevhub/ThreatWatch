@@ -161,7 +161,68 @@
       var questionBody = addSection(panel, 'Suggested next steps');
       addLines(questionBody, questions);
     }
+    loadAiInvestigation((pkg.alert || {}).alert_id, panel);
     return panel;
+  }
+
+  // -- Phase 4E-4K: advisory AI section (labeled AI-GENERATED; safe DOM only) --
+
+  function loadAiInvestigation(alertId, panel) {
+    if (typeof alertId !== 'number' || !alertId) return;
+    fetchJSON('/api/alerts/' + alertId + '/ai-investigation').then(function (ai) {
+      var body = addSection(panel, 'AI investigation \u2014 AI-GENERATED / ADVISORY');
+      body.className += ' ai-advisory';
+      if (!ai || ai.status !== 'ok') {
+        addLines(body, ['AI status: ' + ((ai && ai.status) || 'unavailable') +
+          (ai && ai.reason ? ' (' + ai.reason + ')' : '')]);
+        return;
+      }
+      addLines(body, aiLines(ai));
+    }).catch(function () {
+      var body = addSection(panel, 'AI investigation \u2014 AI-GENERATED / ADVISORY');
+      body.className += ' ai-advisory';
+      addLines(body, ['AI status: unavailable']);
+    });
+  }
+
+  function aiLines(ai) {
+    var response = ai.response || {};
+    var model = (ai.model || {}).model || 'unknown model';
+    var lines = [
+      'AI status: ok (model ' + model + ') \u2014 advisory only, can be wrong',
+      'Summary: ' + (response.summary || '(none)'),
+      'Assessment: ' + (response.assessment || '(none)'),
+      'AI priority: ' + (response.priority || 'unknown') +
+        ' | malicious likelihood: ' + formatLikelihood(response.malicious_likelihood) +
+        ' | false-positive likelihood: ' + formatLikelihood(response.false_positive_likelihood) +
+        ' | confidence: ' + formatLikelihood(response.confidence),
+    ];
+    if (ai.jev_context && ai.jev_context.priority) {
+      lines.push('Jev decision (deterministic, not AI): ' + ai.jev_context.priority);
+    }
+    (response.key_evidence || []).slice(0, 10).forEach(function (item, index) {
+      lines.push('Key evidence ' + (index + 1) + ': ' + item);
+    });
+    (response.mitre_assessment || []).slice(0, 10).forEach(function (entry) {
+      lines.push('ATT&CK ' + entry.technique_id + ': ' + entry.relevance +
+        (entry.rationale ? ' \u2014 ' + entry.rationale : ''));
+    });
+    (response.recommended_actions || []).slice(0, 10).forEach(function (action, index) {
+      lines.push('Recommended step ' + (index + 1) + ': ' + (action.action || '') +
+        (action.reason ? ' \u2014 ' + action.reason : ''));
+    });
+    if (response.source_references && response.source_references.length) {
+      response.source_references.slice(0, 10).forEach(function (reference) {
+        lines.push('Source (' + reference.type + '): ' + reference.value);
+      });
+    } else {
+      lines.push('Sources: none cited by the model for this assessment');
+    }
+    return lines;
+  }
+
+  function formatLikelihood(value) {
+    return (value === null || value === undefined) ? '?' : String(value);
   }
 
   function buildSocLine(alert) {

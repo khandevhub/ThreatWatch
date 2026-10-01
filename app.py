@@ -18,6 +18,8 @@ from event_model import EventValidationError, SecurityEvent
 from hunting import HuntError, hunt
 from investigation import InvestigationError, InvestigationService
 from investigation_provider import apply_investigation_provider, make_investigation_provider
+from ai_hunting import AIHuntError, execute_ai_hunt
+from ai_investigation import AIInvestigationEngine, AI_SCHEMA_VERSION
 from retrieval import KnowledgeRetriever, RetrievalError
 from vector_store import KNOWLEDGE_DB_DEFAULT, VectorStore
 
@@ -328,6 +330,94 @@ def create_app(config=None):
             logger.exception('Knowledge search failed')
             return jsonify(error='knowledge_unavailable'), 503
         return jsonify(payload), status
+
+    # -- Phase 4E-4K: advisory AI copilot (off by default; never breaks
+    # alerts, investigation, or hunting; failures degrade to status payloads).
+
+    def _require_bearer():
+        """Return None when authorized, else an error response tuple."""
+        expected = application.config.get('INGEST_TOKEN')
+        if not expected:
+            return jsonify(error='authentication_disabled'), 503
+        authorization = request.headers.get('Authorization', '')
+        scheme, separator, supplied = authorization.partition(' ')
+        if scheme.lower() != 'bearer' or not separator or not supplied:
+            return jsonify(error='authentication_required'), 401, \
+                {'WWW-Authenticate': 'Bearer'}
+        if not hmac.compare_digest(supplied.encode('utf-8'),
+                                   expected.encode('utf-8')):
+            return jsonify(error='invalid_credentials'), 401, \
+                {'WWW-Authenticate': 'Bearer'}
+        return None
+
+    def _ai_engine():
+        return AIInvestigationEngine(
+            db_file=application.config['DB_FILE'],
+            knowledge_db_file=application.config['KNOWLEDGE_DB_FILE'])
+
+    @application.get('/api/alerts/<int:alert_id>/ai-investigation')
+    def api_alert_ai_investigation(alert_id):
+        try:
+            result = _ai_engine().investigate(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        except Exception:
+            logger.exception('AI investigation failed unexpectedly')
+            return jsonify(ai_schema_version=AI_SCHEMA_VERSION,
+                           status='unavailable', reason='internal_error'), 503
+        return jsonify(result)
+
+    @application.post('/api/alerts/<int:alert_id>/ai-investigation')
+    def api_alert_ai_investigation_recompute(alert_id):
+        # LLM usage is an external effect: bearer-protected like ingestion.
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        try:
+            result = _ai_engine().investigate(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        except Exception:
+            logger.exception('AI investigation failed unexpectedly')
+            return jsonify(ai_schema_version=AI_SCHEMA_VERSION,
+                           status='unavailable', reason='internal_error'), 503
+        return jsonify(result)
+
+    @application.get('/api/alerts/<int:alert_id>/ai-report')
+    def api_alert_ai_report(alert_id):
+        try:
+            report = _ai_engine().build_report(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        except Exception:
+            logger.exception('AI report failed unexpectedly')
+            return jsonify(error='ai_report_unavailable'), 503
+        return jsonify(report)
+
+    @application.post('/api/hunt/ai')
+    def api_hunt_ai():
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True)
+        query_text = body.get('query') if isinstance(body, dict) else None
+        if not isinstance(query_text, str) or not query_text.strip():
+            return jsonify(error='invalid_ai_hunt_query',
+                           message='body must be {"query": "..."}'), 400
+        if len(query_text) > 512:
+            return jsonify(error='invalid_ai_hunt_query',
+                           message='query exceeds maximum length'), 400
+        try:
+            outcome = execute_ai_hunt(
+                query_text, db_file=application.config['DB_FILE'])
+        except AIHuntError as exc:
+            return jsonify(error=exc.reason, message=str(exc)), 400
+        except HuntError as exc:
+            return jsonify(error='invalid_hunt_query', message=str(exc)), 400
+        except Exception:
+            logger.exception('AI hunt failed unexpectedly')
+            return jsonify(error='ai_hunt_unavailable'), 503
+        return jsonify(outcome)
 
     @application.get('/api/alerts/<int:alert_id>/investigation')
     def api_alert_investigation(alert_id):

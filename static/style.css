@@ -116,3 +116,12 @@ p {
   margin: 2px 0;
   overflow-wrap: anywhere;
 }
+
+/* Phase 4E-4K: advisory AI section. Visually distinct from deterministic
+   facts so model output can never masquerade as ThreatWatch's own results. */
+.investigation .inv-section.ai-advisory {
+  border-left: 3px solid #8a6d3b;
+  background: #fcf8e3;
+  padding: 6px 8px;
+  border-radius: 3px;
+}

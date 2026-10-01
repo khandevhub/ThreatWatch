@@ -301,8 +301,15 @@ class VectorStore:
     # -- write API -----------------------------------------------------------
 
     def upsert(self, chunk_id, embedding, document_id, content,
-               document_type, source, metadata=None, title=None):
-        """Insert or update one chunk; validates all inputs fail-closed."""
+               document_type, source, metadata=None, title=None,
+               embedding_model=None):
+        """Insert or update one chunk; validates all inputs fail-closed.
+
+        When ``embedding_model`` is provided it must match the model already
+        recorded for this store (or be recorded as the store's model on the
+        first write), so vectors from incompatible models can never be mixed
+        silently — even when their dimensions happen to be equal.
+        """
         if not isinstance(chunk_id, str) or not chunk_id.strip():
             raise VectorStoreError('chunk_id must be a non-empty string')
         if len(chunk_id) > MAX_CHUNK_ID_CHARS:
@@ -350,7 +357,20 @@ class VectorStore:
         with _connect(self.db_file) as connection:
             _ensure_schema(connection)
             vector = self._validate_dimensions(connection, embedding)
-            model = self._meta(connection, 'embedding_model') or 'unknown'
+            model = self._meta(connection, 'embedding_model')
+            if embedding_model is not None:
+                if not isinstance(embedding_model, str) or not embedding_model.strip():
+                    raise VectorStoreError('embedding_model must be a short string')
+                embedding_model = embedding_model.strip()[:128]
+                if model is None:
+                    self._set_meta(connection, 'embedding_model', embedding_model)
+                    model = embedding_model
+                elif model != embedding_model:
+                    raise VectorStoreError(
+                        f'embedding model mismatch: store was indexed with '
+                        f'{model!r}; refusing vectors from {embedding_model!r} '
+                        f'(reindex or use a new store)')
+            model = model or 'unknown'
             existing = connection.execute(
                 'SELECT created_at FROM knowledge_chunks WHERE chunk_id = ?',
                 (chunk_id,)).fetchone()
@@ -404,7 +424,8 @@ class VectorStore:
                 item.get('chunk_id'), item.get('embedding'),
                 item.get('document_id'), item.get('content'),
                 item.get('document_type'), item.get('source'),
-                metadata=item.get('metadata'), title=item.get('title')))
+                metadata=item.get('metadata'), title=item.get('title'),
+                embedding_model=item.get('embedding_model')))
         return results
 
     def delete(self, chunk_id):

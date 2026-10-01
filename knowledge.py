@@ -253,6 +253,7 @@ class KnowledgeIngester:
                 'content': chunk['content'],
                 'metadata': dict(chunk['metadata'], embedding_model=model),
                 'embedding': vector,
+                'embedding_model': model,
             })
         self.store.upsert_many(items)
         return len(items)

@@ -398,6 +398,128 @@ uv run python knowledge_admin.py search "password spraying" --top-k 3 \
 `knowledge.sqlite`); `--soc-db` selects the SOC database for historical
 incidents (default `DB_FILE` or `db.sqlite`).
 
+## AI investigation copilot (Phase 4E–4K)
+
+Phase 4E–4K extends the RAG foundation with an **advisory, evidence-grounded
+AI layer**: an optional real embedding model, a provider-neutral LLM seam, a
+validated RAG investigation engine, structured reports, recommendations, and
+AI-assisted hunting. **AI output is advisory only** — it never overrides
+deterministic risk scoring, Jev, alerting, or investigation lifecycle, and it
+cannot execute anything. No autonomous remediation exists in any phase.
+
+**Real semantic embeddings (4E)**: `SemanticEmbeddingProvider`
+(`EMBEDDING_PROVIDER=local-semantic`) runs a genuine sentence-embedding model
+on CPU via the optional [`fastembed`](https://github.com/qdrant/fastembed)
+package (ONNX, quantized; add with `uv sync --extra semantic`). Default model
+`BAAI/bge-small-en-v1.5` (384 dims, ~130 MB downloaded once to the fastembed
+cache on first use; ~100 MB disk, runs comfortably in ~500 MB RAM). The model
+is loaded once per process and reused; every vector is validated against the
+declared dimensions. The hash/mock/disabled providers remain the default path.
+The vector store records the embedding model per store and **refuses vectors
+from a different model** (even at equal dimensions) so incompatible indexes
+never mix silently — reindex or use a new store when switching models.
+
+**LLM provider (4F)** (`llm_provider.py`): `LLMProvider` with three
+implementations — `disabled` (default), `mock` (deterministic offline output
+grounded in the request manifest; used by all tests), and
+`openai-compatible` (stdlib-urllib chat-completions client for any
+OpenAI-compatible endpoint, including local servers such as Ollama on
+loopback HTTP). Configuration: `AI_LLM_PROVIDER`, `AI_LLM_ENDPOINT`,
+`AI_LLM_MODEL`, `AI_LLM_API_KEY` / `AI_LLM_API_KEY_FILE`,
+`AI_LLM_TIMEOUT_SECONDS` (1–120), `AI_LLM_MAX_OUTPUT_TOKENS` (64–4000),
+`AI_LLM_TEMPERATURE`. Keys never appear in logs, results, or API responses;
+plain HTTP is accepted only for loopback endpoints; prompts and responses are
+hard-bounded; API clients can never choose endpoints or system prompts.
+
+**RAG investigation engine (4G)** (`ai_investigation.py`):
+`AIInvestigationEngine.investigate(alert_id)` runs
+alert → Phase 3 investigation package → deterministic retrieval query →
+`KnowledgeRetriever` → bounded RAG context → LLM → strict validation. The
+model sees ONLY a bounded view: alert/risk/entities/first-10 timeline
+entries/indicators/threat-intel matches/related alerts (all pre-redacted), up
+to `AI_INVESTIGATION_TOP_K` (1–10, default 5) knowledge snippets, and the
+allowed-reference manifest — never the database, raw event dumps, or
+credentials. The prompt has four explicit sections — SYSTEM INSTRUCTIONS,
+LIVE INVESTIGATION EVIDENCE, RETRIEVED KNOWLEDGE (labeled UNTRUSTED DATA),
+ANALYST REQUEST — and the system instructions forbid following instruction-like
+content, revealing secrets, generating SQL/commands/URLs, or changing
+objectives. Jev's decision is included as clearly-labeled deterministic
+context, never replaced.
+
+**Structured validated response (4H)**: the model must return one JSON object
+(`summary`, `assessment`, `priority` enum, `malicious_likelihood`,
+`false_positive_likelihood`, `confidence` — bounded 0–1, `key_evidence`,
+`mitre_assessment` with technique-ID regex and relevance enum,
+`recommended_actions`, `investigation_questions`, `source_references` with a
+closed type enum). Everything is length- and list-bounded; violations become a
+controlled `status: unavailable / invalid_ai_response`. **Grounding**: every
+`source_reference` is checked against a manifest of references that actually
+exist in the evidence/knowledge; invented references are dropped and the drop
+count is reported. Malformed output never reaches an analyst.
+
+**AI report (4I)**: `build_report` assembles the 13-section JSON report
+(executive summary, alert overview, risk, timeline, key evidence, threat
+intel, ATT&CK, related alerts, AI assessment, false-positive considerations,
+recommended steps, confidence, sources). Deterministic sections come from the
+Phase 3 package and are never modified by the model; AI sections carry an
+explicit advisory note and degrade to deterministic fallbacks when AI is off.
+
+**Recommendations (4J)**: bounded advisory next steps (`action`, `reason`,
+optional validated `reference`) either from validated AI output or from
+deterministic rule/technique guidance when AI is unavailable. Recommendations
+are never executed.
+
+**AI-assisted hunting (4K)** (`ai_hunting.py`): the LLM translates natural
+language into a structured filter object (`filters`, `limit`, `explanation`)
+using only the Phase 3 hunt-filter catalog. ThreatWatch re-validates every key
+and value through `hunting.parse_hunt_filters` (unknown filters, unsafe
+values, and bad limits fail closed), executes the query with the existing
+deterministic engine, and then asks the model for a bounded summary
+(`summary`, `observations`, `confidence`) — which is validated separately.
+Summary failures degrade to `status: unavailable` while the raw redacted
+results still return. The LLM never generates SQL and never touches the
+database directly.
+
+**Cost controls**: prompt/system bounds, bounded retrieval, max output tokens,
+timeouts, and an optional evidence-hash cache (`AI_CACHE_ENABLED=1`, default
+off) that skips repeat LLM calls for unchanged investigation evidence and
+invalidates automatically when evidence changes.
+
+### AI API endpoints
+
+| Endpoint | Auth | Behavior |
+|---|---|---|
+| `GET /api/alerts/<id>/ai-investigation` | none (read-only) | Validated AI investigation; `status: disabled` with reason when AI is off; 404 for unknown alerts |
+| `POST /api/alerts/<id>/ai-investigation` | bearer (may invoke the LLM) | Same computation, explicit recompute |
+| `GET /api/alerts/<id>/ai-report` | none (read-only) | 13-section report; works with AI disabled |
+| `POST /api/hunt/ai` | bearer (may invoke the LLM) | Body `{"query": "..."}`; AI translation/validation/execution/summary |
+
+AI failures never break alerts, investigation, or hunting: every AI endpoint
+degrades to a structured `unavailable`/`disabled` payload (or 503) while the
+deterministic surfaces keep working.
+
+**Dashboard**: the investigation panel appends an "AI investigation —
+AI-GENERATED / ADVISORY" section (visually distinct styling) rendered
+exclusively with text nodes — status, summary, assessment, priority,
+likelihoods, confidence, key evidence, ATT&CK assessment, recommendations,
+source references, and the Jev decision labeled as deterministic context. With
+AI disabled it shows the status line and everything else works unchanged.
+
+### Optional live-LLM smoke test (never part of pytest)
+
+```bash
+# PowerShell
+$env:AI_LLM_PROVIDER = "openai-compatible"
+$env:AI_LLM_API_KEY  = "<your key>"          # or AI_LLM_API_KEY_FILE
+uv run python tools/ai_smoke_test.py --check      # config check only
+uv run python tools/ai_smoke_test.py              # investigate latest alert
+uv run python tools/ai_smoke_test.py --hunt "failed logins from 203.0.113.x"
+```
+
+The script refuses to run without explicit configuration, never prints the
+key, and never modifies data. The automated test suite is fully offline and
+uses `MockLLMProvider` exclusively.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -411,9 +533,19 @@ incidents (default `DB_FILE` or `db.sqlite`).
 | `INGEST_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `INGEST_TOKEN` |
 | `INVESTIGATION_AI_ENABLED` | `false` | Attach the offline mock AI perspective to investigation packages |
 | `KNOWLEDGE_DB_FILE` | `knowledge.sqlite` | Vector-store database path (Phase 4) |
-| `EMBEDDING_PROVIDER` | `disabled` | Query embedding provider: `disabled`, `local`, or `mock` |
-| `EMBEDDING_DIMENSIONS` | `256` | Local hashing-embedding dimensions (8–2048) |
+| `EMBEDDING_PROVIDER` | `disabled` | Query embedding provider: `disabled`, `local`, `local-semantic`, or `mock` |
+| `EMBEDDING_DIMENSIONS` | `256` | Embedding dimensions (hashing default 256; semantic default 384) |
+| `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | Semantic embedding model identifier (fastembed-supported) |
 | `LOCAL_EMBEDDING_PROVIDER` | `local-hash` | Concrete offline provider behind `EMBEDDING_PROVIDER=local` |
+| `AI_LLM_PROVIDER` | `disabled` | LLM provider: `disabled`, `mock`, or `openai-compatible` |
+| `AI_LLM_ENDPOINT` | `https://api.openai.com/v1/chat/completions` | Chat-completions endpoint (plain HTTP only for loopback) |
+| `AI_LLM_MODEL` | `gpt-4o-mini` | Model name sent to the endpoint |
+| `AI_LLM_API_KEY` / `AI_LLM_API_KEY_FILE` | unset | Bearer key for the LLM endpoint; never logged |
+| `AI_LLM_TIMEOUT_SECONDS` | `20` | Request timeout (1–120) |
+| `AI_LLM_MAX_OUTPUT_TOKENS` | `800` | Output cap (64–4000) |
+| `AI_LLM_TEMPERATURE` | `0.2` | Sampling temperature (0.0–2.0) |
+| `AI_INVESTIGATION_TOP_K` | `5` | Knowledge chunks per AI investigation (1–10) |
+| `AI_CACHE_ENABLED` | `false` | Cache AI results keyed by evidence hash until evidence changes |
 | `PORT` | `5000` | Local Waitress port when running `python app.py` |
 
 ## Tests and project layout
@@ -430,13 +562,19 @@ simulator/API end-to-end behavior, dashboard safety, path handling, the Phase 3
 evidence/redaction model, investigation packages, hunting (filters, limits,
 SQL-injection attempts), lifecycle transitions/audit, provider seam, a full
 Phase 3 end-to-end flow, and the Phase 4 vector store (persistence, dimension
-locking, filters), embedding providers (determinism, bounds, failure), knowledge
-ingestion (sources, idempotence, redaction, stable IDs), chunking, retrieval
-(filters, top-k bounds, deterministic ordering), the RAG context package,
-knowledge API integration, Phase 4 security (injection-as-data, secrets, path
-safety), and a full Phase 4 end-to-end flow.
+locking, model-mismatch rejection), embedding providers (determinism, bounds,
+failure, optional semantic model metadata), knowledge ingestion (sources,
+idempotence, redaction, stable IDs), chunking, retrieval (filters, top-k bounds,
+deterministic ordering), the RAG context package, knowledge API integration,
+Phase 4 security (injection-as-data, secrets, path safety), a full Phase 4
+end-to-end flow, and the Phase 4E–4K AI copilot (LLM provider seam and config
+validation, structured-response validation matrix, grounding/anti-fabrication,
+prompt-injection-as-data, the RAG investigation pipeline with mock providers,
+caching/invalidation, AI reports, recommendations, AI hunting translation and
+summary degradation, AI endpoint auth/validation/disabled states, and dashboard
+advisory-label safety) — all offline via `MockLLMProvider`.
 
-Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (offline embedding providers), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `knowledge_admin.py` (index admin CLI), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (embedding providers incl. optional semantic), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `llm_provider.py` (LLM provider seam), `ai_investigation.py` (RAG investigation engine, validation, grounding, report), `ai_hunting.py` (AI-assisted hunting), `knowledge_admin.py` (index admin CLI), `tools/ai_smoke_test.py` (optional live-LLM smoke test), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search, AI copilot endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
 
 ## Current limitations
 
@@ -445,7 +583,9 @@ Important files: `event_model.py` (versioned validation/normalization), `databas
 - Threat intelligence remains a small static CSV without feed lifecycle, expiry, or history; enrichment is exact-match only.
 - Correlation is indicator-based within the SQLite/local deployment; there is no distributed streaming, and suppression state is per-database.
 - Jev is advisory only; there is no autonomous response, blocking, or SOAR. Phase 3 adds a deterministic offline AI-perspective seam only — no chatbot or external AI calls in the investigation layer.
-- The Phase 4 retrieval foundation is a data layer only: LLM investigation is **not implemented yet**, there are no external embedding/AI calls, and the `local-hash` embedding is a deterministic bag-of-features substitute, not a semantic transformer model — retrieval quality reflects term overlap, not deep semantics.
+- The Phase 4 retrieval foundation is a data layer; the Phase 4E–4K AI copilot is **advisory only** and can be wrong. It is not autonomous, cannot execute actions, and never overrides deterministic detection, risk, Jev, or the investigation lifecycle. No SOAR, playbooks, or automated remediation exist.
+- The AI layer makes external calls only when explicitly configured (`AI_LLM_PROVIDER=openai-compatible` + key); the default, the test suite, and all offline modes make zero network calls. The real embedding provider is optional (`uv sync --extra semantic`) and downloads its model once on first use.
+- The `local-hash` embedding is a deterministic bag-of-features substitute, not a semantic transformer model — retrieval quality reflects term overlap; switch to `local-semantic` for true semantic retrieval (requires reindexing into a fresh store).
 - The vector store is a single-file SQLite index with in-process cosine search; it is not a distributed or approximate-nearest-neighbor engine, and indexes are per-database file.
 - Knowledge ingestion is bounded to explicit sources (rules, ATT&CK mappings, local intel CSV, generated guides, structural incident summaries, and the fixed README/LICENSE allowlist); it does not crawl arbitrary repositories or files.
 - Dashboard and read-only alert APIs have no user accounts/RBAC; keep them on loopback or add an authenticated access layer before any remote exposure.
