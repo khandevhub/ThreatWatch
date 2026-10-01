@@ -21,8 +21,10 @@ MAX_LIST_ITEMS = 50
 MAX_TIMELINE_ENTRIES = 100
 
 SECRET_KEY_PATTERN = re.compile(
-    r'(?i)\b(authorization|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|'
-    r'secret|password|passwd|pwd|passphrase|token|credential|private[_-]?key)\b'
+    r'(?i)(?<![A-Za-z])'
+    r'(authorization|api[_-]?key|apikey|access[_-]?token|auth[_-]?token|'
+    r'secret|password|passwd|pwd|passphrase|token|credential|private[_-]?key)'
+    r'\b'
     r'([:=])\s*("?)([^\s",;]+)')
 _BEARER_PATTERN = re.compile(r'(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+')
 _PRIVATE_KEY_PATTERN = re.compile(
@@ -33,7 +35,9 @@ def redact_text(value, limit=MAX_TEXT_LENGTH):
     """Mask secret material and bound length; deterministic and idempotent.
 
     Free-text fields (command lines, messages, metadata) may legitimately
-    contain credentials; they are masked before evidence is built.
+    contain credentials; they are masked before evidence is built. The key
+    pattern matches prefixed variable names too (INGEST_TOKEN=, JEV_API_KEY=)
+    so Phase 4 knowledge ingestion never indexes such values.
     """
     if value is None:
         return None

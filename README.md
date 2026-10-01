@@ -60,6 +60,33 @@ mock provider that derives its output from the package itself, and enabling it
 (`INVESTIGATION_AI_ENABLED=1`) never produces network calls. See
 "Investigation and hunting (Phase 3)" below for details.
 
+## Phase 4 — RAG foundation at a glance
+
+```
+KNOWLEDGE SOURCES (rules, ATT&CK, intel CSV, guides, incidents, docs)
+      ↓
+DOCUMENT NORMALIZATION   knowledge.py (typed documents, redaction, stable IDs)
+      ↓
+DETERMINISTIC CHUNKING   bounded chunks with overlap, stable chunk IDs
+      ↓
+EMBEDDINGS   embeddings.py (offline hashing provider; provider seam)
+      ↓
+VECTOR STORE   vector_store.py (SQLite-backed, persistent, filterable)
+      ↓
+RETRIEVER   retrieval.py (bounded top-k, metadata filters, deterministic)
+      ↓
+RAG CONTEXT   structured {query, retrieved_documents, evidence, metadata}
+      ↓
+[ FUTURE LLM INVESTIGATION — NOT IMPLEMENTED YET ]
+```
+
+**LLM investigation is not implemented yet.** Phase 4 builds only the
+provider-neutral retrieval foundation: it stores, searches, and packages
+data. It generates no answers, makes no LLM calls, adds no AI SDKs, and
+leaves Jev and the Phase 3 advisory provider exactly as they were.
+
+See "Knowledge retrieval and RAG foundation (Phase 4)" below for details.
+
 ## Requirements and reproducible setup
 
 ThreatWatch supports Python 3.12 and 3.13 (`>=3.12,<3.14`). Use [uv](https://docs.astral.sh/uv/) to install the exact dependency graph in `uv.lock`, including test tools:
@@ -289,6 +316,88 @@ canonical package sections (status, risk, entities, unavailable evidence, threat
 intel, ATT&CK, related alerts, first ten timeline entries, suggested next steps)
 using text nodes only — no `innerHTML`, no template changes.
 
+## Knowledge retrieval and RAG foundation (Phase 4)
+
+Phase 4 adds a local, offline retrieval layer over ThreatWatch's own security
+knowledge so a future LLM investigation layer can be fed structured context.
+Everything is deterministic, bounded, and secret-safe; no new third-party
+dependencies are introduced.
+
+**Vector storage** (`vector_store.py`): a provider-neutral `VectorStore` on top
+of SQLite (file `knowledge.sqlite`, separate from the SOC database). Chunks
+carry the embedding (JSON float vector), document ID, chunk ID, document type,
+source, title, structured metadata (`mitre_techniques`, `rule_id`, `alert_id`,
+`timestamp`), and content hashes. `upsert`/`delete`/`delete_document`/`get`/
+`get_document_chunks`/`search`/`count`/`stats` are the whole API. Search is
+cosine similarity computed in-process — fast for the bounded local indexes this
+project targets (hundreds to low thousands of chunks) — with deterministic
+ordering (score DESC, then chunk ID) and hard limits (top-k ≤ 50). The first
+write locks the store's dimensionality; mismatched vectors fail closed.
+Metadata filters are whitelisted and validated exactly like the Phase 3 hunt
+filters (`document_type`, `source`, `technique`, `rule_id`, `alert_id`,
+`time_from`/`time_to`; quote-delimited technique matching so `T1110` never
+matches `T1110.003`); unknown filters are rejected.
+
+**Embeddings** (`embeddings.py`): an `EmbeddingProvider` interface
+(`embed_text`/`embed_many`/`describe`) with three offline implementations.
+The default is `disabled` (embedding off). `local` selects the deterministic
+`local-hash` provider — a hashed bag-of-words+bigrams embedding (blake2b,
+sign-hashed, L2-normalized, 8–2048 dimensions, default 256) with no model
+download, no GPU, and identical vectors across runs and platforms. `mock`
+provides tiny fixed-vocabulary vectors for tests. Indexing defaults to the
+local provider so admin indexing works without configuration.
+
+**Knowledge ingestion** (`knowledge.py`): explicit sources only — detection
+rules and their ATT&CK mappings (from the rule registry), per-technique MITRE
+documents, the threat-intel CSV (parsed structurally, never as raw text),
+deterministic investigation guides (per-rule and lifecycle), historical
+resolved/dismissed alert summaries (structural fields only, no free text), and
+a fixed allowlist of repository documentation (`README.md`, `LICENSE.txt`).
+Nothing can be ingested from caller-supplied paths. Every text passes
+`redact_text` before chunking, hashing, or embedding, so credentials and
+key=value secrets (including prefixed names like `INGEST_TOKEN=`) are never
+indexed. Document types: `detection_rule`, `mitre_technique`,
+`threat_intelligence`, `investigation_guide`, `historical_incident`,
+`project_documentation`. Documents carry stable IDs, content hashes, versions,
+and classification metadata.
+
+**Chunking**: deterministic paragraph-first splitting (then sentences, then
+hard cuts) with bounded size (800 chars), overlap (120), and stable chunk IDs
+(`<document_id>#<index>`). Re-ingesting unchanged content rewrites the same
+rows — idempotent; changed content updates its chunks and stale chunks from a
+larger previous version are removed.
+
+**Retrieval** (`retrieval.py`): `KnowledgeRetriever` embeds a validated query
+(≤ 512 chars), searches the store, and returns bounded top-k results (default
+5, max 20) with scores, sources, chunk/document IDs, and metadata — ordered
+deterministically. `build_rag_context` packages retrieval results plus live
+investigation evidence into one JSON-serializable structure: `query`,
+`retrieved_documents` (origin `knowledge_base`, marked untrusted), `evidence`
+(origin `live_investigation`), `sources`, and `metadata` including an explicit
+usage note that retrieved documents are untrusted data, never instructions.
+The builder generates no answers, fabricates nothing, bounds every snippet and
+the total context, and re-redacts defensively.
+
+**API** (read-only): `GET /api/knowledge/search?q=<query>&top_k=<k>&<filters>`
+returns bounded retrieval results (400 on invalid queries/filters). The
+investigation endpoint accepts `?with_knowledge=1` to attach a
+`knowledge_context` section; retrieval failures degrade to
+`status=unavailable` and never break the package. There are no write endpoints:
+indexing stays a local admin operation.
+
+**Admin CLI** (`knowledge_admin.py`):
+
+```bash
+uv run python knowledge_admin.py index          # ingest/reindex all sources (idempotent)
+uv run python knowledge_admin.py stats          # chunk/document counts by type
+uv run python knowledge_admin.py search "password spraying" --top-k 3 \
+    --filter document_type=detection_rule       # bounded retrieval test
+```
+
+`--db` selects the vector store file (default `KNOWLEDGE_DB_FILE` or
+`knowledge.sqlite`); `--soc-db` selects the SOC database for historical
+incidents (default `DB_FILE` or `db.sqlite`).
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -301,6 +410,10 @@ using text nodes only — no `innerHTML`, no template changes.
 | `INGEST_TOKEN` | unset | Bearer token; at least 32 characters when set |
 | `INGEST_TOKEN_FILE` | unset | File containing the bearer token; mutually exclusive with `INGEST_TOKEN` |
 | `INVESTIGATION_AI_ENABLED` | `false` | Attach the offline mock AI perspective to investigation packages |
+| `KNOWLEDGE_DB_FILE` | `knowledge.sqlite` | Vector-store database path (Phase 4) |
+| `EMBEDDING_PROVIDER` | `disabled` | Query embedding provider: `disabled`, `local`, or `mock` |
+| `EMBEDDING_DIMENSIONS` | `256` | Local hashing-embedding dimensions (8–2048) |
+| `LOCAL_EMBEDDING_PROVIDER` | `local-hash` | Concrete offline provider behind `EMBEDDING_PROVIDER=local` |
 | `PORT` | `5000` | Local Waitress port when running `python app.py` |
 
 ## Tests and project layout
@@ -313,12 +426,17 @@ uv run --locked --group dev pip-audit
 The suite covers event validation, database creation/migration (including the
 Phase 3 status canonicalization), restart-safe collection and deduplication, the
 current deterministic rules and threat-intel enrichment, API authentication/errors,
-simulator/API end-to-end behavior, dashboard safety, path handling, and the Phase 3
+simulator/API end-to-end behavior, dashboard safety, path handling, the Phase 3
 evidence/redaction model, investigation packages, hunting (filters, limits,
-SQL-injection attempts), lifecycle transitions/audit, provider seam, and a full
-Phase 3 end-to-end flow.
+SQL-injection attempts), lifecycle transitions/audit, provider seam, a full
+Phase 3 end-to-end flow, and the Phase 4 vector store (persistence, dimension
+locking, filters), embedding providers (determinism, bounds, failure), knowledge
+ingestion (sources, idempotence, redaction, stable IDs), chunking, retrieval
+(filters, top-k bounds, deterministic ordering), the RAG context package,
+knowledge API integration, Phase 4 security (injection-as-data, secrets, path
+safety), and a full Phase 4 end-to-end flow.
 
-Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (offline embedding providers), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `knowledge_admin.py` (index admin CLI), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
 
 ## Current limitations
 
@@ -326,7 +444,10 @@ Important files: `event_model.py` (versioned validation/normalization), `databas
 - Traffic spikes still fire on event type, not a measured baseline.
 - Threat intelligence remains a small static CSV without feed lifecycle, expiry, or history; enrichment is exact-match only.
 - Correlation is indicator-based within the SQLite/local deployment; there is no distributed streaming, and suppression state is per-database.
-- Jev is advisory only; there is no autonomous response, blocking, or SOAR. Phase 3 adds a deterministic offline AI-perspective seam only — no RAG, embeddings, vector store, chatbot, or external AI calls in the investigation layer.
+- Jev is advisory only; there is no autonomous response, blocking, or SOAR. Phase 3 adds a deterministic offline AI-perspective seam only — no chatbot or external AI calls in the investigation layer.
+- The Phase 4 retrieval foundation is a data layer only: LLM investigation is **not implemented yet**, there are no external embedding/AI calls, and the `local-hash` embedding is a deterministic bag-of-features substitute, not a semantic transformer model — retrieval quality reflects term overlap, not deep semantics.
+- The vector store is a single-file SQLite index with in-process cosine search; it is not a distributed or approximate-nearest-neighbor engine, and indexes are per-database file.
+- Knowledge ingestion is bounded to explicit sources (rules, ATT&CK mappings, local intel CSV, generated guides, structural incident summaries, and the fixed README/LICENSE allowlist); it does not crawl arbitrary repositories or files.
 - Dashboard and read-only alert APIs have no user accounts/RBAC; keep them on loopback or add an authenticated access layer before any remote exposure.
 - SQLite and the in-process rate limiter are for a single local deployment, not a multi-node service.
 - The hunting layer is exact/substring over stored events with alert linkage; there is no Sigma parser, saved-query workbench, cross-database federated search, or case management.

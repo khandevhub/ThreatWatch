@@ -13,10 +13,13 @@ from werkzeug.exceptions import BadRequest, RequestEntityTooLarge
 
 from database import DB, EventIdConflictError, connect, init_db, utc_now
 from detector import process_event
+from embeddings import make_indexing_provider
 from event_model import EventValidationError, SecurityEvent
 from hunting import HuntError, hunt
 from investigation import InvestigationError, InvestigationService
 from investigation_provider import apply_investigation_provider, make_investigation_provider
+from retrieval import KnowledgeRetriever, RetrievalError
+from vector_store import KNOWLEDGE_DB_DEFAULT, VectorStore
 
 from security_config import load_ingest_token, validate_ingest_token
 
@@ -183,6 +186,7 @@ def create_app(config=None):
         DB_FILE=DB,
         INGEST_TOKEN=load_ingest_token(),
         MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
+        KNOWLEDGE_DB_FILE=KNOWLEDGE_DB_DEFAULT,
         TESTING=False,
     )
     if config:
@@ -265,18 +269,6 @@ def create_app(config=None):
             return jsonify(error='alert_not_found'), 404
         return jsonify(alert_id=alert_id, status=requested)
 
-    @application.get('/api/alerts/<int:alert_id>/investigation')
-    def api_alert_investigation(alert_id):
-        service = InvestigationService(db_file=application.config['DB_FILE'])
-        try:
-            package = service.build_investigation(alert_id)
-        except InvestigationError:
-            return jsonify(error='alert_not_found'), 404
-        # Advisory AI perspective (disabled by default; never networked here).
-        apply_investigation_provider(
-            package, make_investigation_provider())
-        return jsonify(package)
-
     @application.get('/api/alerts/<int:alert_id>/timeline')
     def api_alert_timeline(alert_id):
         service = InvestigationService(db_file=application.config['DB_FILE'])
@@ -304,6 +296,69 @@ def create_app(config=None):
         except HuntError as exc:
             return jsonify(error='invalid_hunt_query', message=str(exc)), 400
         return jsonify(results)
+
+    # -- Phase 4: knowledge retrieval (read-only; index writes stay local) ----
+
+    def _knowledge_search(query, top_k, filters):
+        """Bounded knowledge search; returns (payload, status_code).
+
+        Query embedding uses the offline local provider when no provider is
+        configured: the endpoint is read-only, so a deterministic local
+        fallback keeps it usable without env setup (same policy as the CLI).
+        """
+        store = VectorStore(db_file=application.config['KNOWLEDGE_DB_FILE'])
+        retriever = KnowledgeRetriever(store, make_indexing_provider())
+        results = retriever.retrieve(query, top_k=top_k, filters=filters)
+        return results, 200
+
+    @application.get('/api/knowledge/search')
+    def api_knowledge_search():
+        query = request.args.get('q', '')
+        top_k = request.args.get('top_k', None)
+        filters = {}
+        for key in request.args:
+            if key in ('q', 'top_k'):
+                continue
+            filters[key] = request.args.get(key)
+        try:
+            payload, status = _knowledge_search(query, top_k, filters or None)
+        except RetrievalError as exc:
+            return jsonify(error='invalid_knowledge_query', message=str(exc)), 400
+        except Exception:
+            logger.exception('Knowledge search failed')
+            return jsonify(error='knowledge_unavailable'), 503
+        return jsonify(payload), status
+
+    @application.get('/api/alerts/<int:alert_id>/investigation')
+    def api_alert_investigation(alert_id):
+        service = InvestigationService(db_file=application.config['DB_FILE'])
+        try:
+            package = service.build_investigation(alert_id)
+        except InvestigationError:
+            return jsonify(error='alert_not_found'), 404
+        with_knowledge = (request.args.get('with_knowledge', '').strip().lower()
+                          in ('1', 'true', 'yes', 'on'))
+        if with_knowledge:
+            try:
+                query = ' '.join([
+                    package['alert'].get('rule') or '',
+                    package['alert'].get('details') or '',
+                ]).strip()[:512]
+                payload, _status = _knowledge_search(query, 5, None)
+                package['knowledge_context'] = {
+                    'status': 'ok',
+                    'query': payload['query'],
+                    'retrieved_documents': payload['results'],
+                }
+            except Exception:
+                # Advisory context must never break the investigation package.
+                logger.exception('Knowledge context retrieval failed')
+                package['knowledge_context'] = {'status': 'unavailable',
+                                                'reason': 'retrieval_error'}
+        # Advisory AI perspective (disabled by default; never networked here).
+        apply_investigation_provider(
+            package, make_investigation_provider())
+        return jsonify(package)
 
     @application.post('/api/ingest')
     def api_ingest():
