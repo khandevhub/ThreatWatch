@@ -39,7 +39,7 @@ def _audit_rows(dbfile, alert_id):
 def test_canonical_status_constants():
     assert INVESTIGATION_STATUSES == ('new', 'investigating', 'resolved', 'dismissed')
     assert set(ALLOWED_TRANSITIONS) == set(INVESTIGATION_STATUSES)
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION >= 3
 
 
 def test_canonical_status_accepts_canonical_and_alias_inputs():

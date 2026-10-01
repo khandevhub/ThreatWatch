@@ -7,7 +7,7 @@ import sqlite3
 import time
 
 DB = os.environ.get('DB_FILE', 'db.sqlite')
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class EventIdConflictError(ValueError):
@@ -200,6 +200,134 @@ def init_db(db_file=None):
                     source TEXT NOT NULL
                 )
             ''')
+            # -- SOAR framework (schema v4) -----------------------------------
+            # Playbook definitions are versioned; executions, actions,
+            # approvals, incidents, and audit rows reference them. All SOAR
+            # writes go through soar.py, which enforces the state machine and
+            # idempotency; nothing else should touch these tables directly.
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_playbooks (
+                    playbook_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version >= 1),
+                    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+                    definition_json TEXT NOT NULL,
+                    definition_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    playbook_id TEXT NOT NULL REFERENCES soar_playbooks(playbook_id),
+                    playbook_version INTEGER NOT NULL,
+                    alert_id INTEGER REFERENCES alerts(id) ON DELETE SET NULL,
+                    state TEXT NOT NULL CHECK (state IN (
+                        'PENDING', 'VALIDATING', 'WAITING_APPROVAL', 'APPROVED',
+                        'RUNNING', 'SUCCEEDED', 'VALIDATION_FAILED',
+                        'APPROVAL_REJECTED', 'APPROVAL_EXPIRED', 'ACTION_FAILED',
+                        'CANCELLED', 'TIMED_OUT')),
+                    dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+                    idempotency_key TEXT NOT NULL,
+                    trigger_json TEXT NOT NULL,
+                    context_json TEXT NOT NULL,
+                    evidence_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (idempotency_key)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_execution_actions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    execution_id TEXT NOT NULL REFERENCES soar_executions(execution_id)
+                        ON DELETE CASCADE,
+                    action_index INTEGER NOT NULL CHECK (action_index >= 0),
+                    action_type TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (state IN (
+                        'PENDING', 'WAITING_APPROVAL', 'APPROVED', 'RUNNING',
+                        'SUCCEEDED', 'FAILED', 'SKIPPED', 'CANCELLED', 'TIMED_OUT')),
+                    parameters_json TEXT NOT NULL,
+                    dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+                    attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+                    result_json TEXT,
+                    error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (execution_id, action_index)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_approvals (
+                    approval_id TEXT PRIMARY KEY,
+                    execution_id TEXT NOT NULL REFERENCES soar_executions(execution_id)
+                        ON DELETE CASCADE,
+                    action_index INTEGER NOT NULL,
+                    action_type TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    requester TEXT NOT NULL,
+                    approver TEXT,
+                    decision TEXT NOT NULL CHECK (decision IN (
+                        'pending', 'approved', 'rejected', 'expired', 'cancelled')),
+                    decided_at TEXT,
+                    reason TEXT,
+                    expires_at TEXT NOT NULL,
+                    required_role TEXT NOT NULL
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_incidents (
+                    incident_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN (
+                        'open', 'contained', 'resolved', 'closed')),
+                    alert_ids_json TEXT NOT NULL,
+                    correlation_id TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (title, correlation_id)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS soar_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    execution_id TEXT,
+                    playbook_id TEXT,
+                    action_index INTEGER,
+                    alert_id INTEGER,
+                    actor TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    from_state TEXT,
+                    to_state TEXT,
+                    dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+                    approval_state TEXT,
+                    result_json TEXT,
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL
+                )
+            ''')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_executions_playbook '
+                'ON soar_executions(playbook_id, created_at DESC)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_executions_alert '
+                'ON soar_executions(alert_id)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_actions_execution '
+                'ON soar_execution_actions(execution_id, action_index)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_approvals_execution '
+                'ON soar_approvals(execution_id)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_audit_execution '
+                'ON soar_audit(execution_id, id)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_soar_audit_alert '
+                'ON soar_audit(alert_id)')
             # Phase 2 lifecycle values canonicalize to the Phase 3 states.
             if version < 3:
                 connection.execute(

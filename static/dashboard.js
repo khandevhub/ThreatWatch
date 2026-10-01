@@ -300,8 +300,143 @@
     });
   }
 
+  // -- Phase 5: SOAR section (read-only, safe DOM rendering) ------------
+
+  function soarLine(text, className) {
+    var div = document.createElement('div');
+    div.className = className || 'meta';
+    div.textContent = String(text == null ? '' : text);
+    return div;
+  }
+
+  function soarStateChip(state) {
+    var chip = document.createElement('span');
+    chip.className = 'soar-chip ' +
+      (state === 'SUCCEEDED' ? 'soar-ok' :
+        state === 'RUNNING' || state === 'APPROVED' ? 'soar-run' :
+        state === 'WAITING_APPROVAL' || state === 'PENDING' ? 'soar-wait' :
+        'soar-bad');
+    chip.textContent = String(state || '?');
+    return chip;
+  }
+
+  function soarFillList(id, rows, build) {
+    var container = document.getElementById(id);
+    if (!container) return;
+    var children = rows.map(build);
+    if (!children.length) {
+      children = [soarLine('No records.', 'meta')];
+    }
+    container.replaceChildren.apply(container, children);
+  }
+
+  function buildPlaybookRow(playbook) {
+    var wrap = document.createElement('div');
+    wrap.className = 'soar-item';
+    var title = document.createElement('div');
+    title.appendChild(soarStateChip(playbook.enabled ? 'ENABLED' : 'DISABLED'));
+    title.appendChild(soarLine(
+      playbook.playbook_id + ' v' + playbook.version + ' — ' + playbook.name +
+      ' (approval: ' + playbook.definition.approval_policy + ')'));
+    wrap.appendChild(title);
+    return wrap;
+  }
+
+  function buildExecutionRow(execution) {
+    var wrap = document.createElement('div');
+    wrap.className = 'soar-item';
+    var head = document.createElement('div');
+    head.appendChild(soarStateChip(execution.state));
+    head.appendChild(soarLine(
+      execution.execution_id + ' — ' + execution.playbook_id +
+      ' v' + execution.playbook_version + ' · alert #' + execution.alert_id));
+    head.appendChild(soarLine(execution.dry_run ? 'DRY RUN' : 'REAL EXECUTION',
+      execution.dry_run ? 'meta soar-dry' : 'meta soar-real'));
+    if (execution.error) {
+      head.appendChild(soarLine(execution.error, 'meta soar-err'));
+    }
+    wrap.appendChild(head);
+    return wrap;
+  }
+
+  function buildApprovalRow(approval) {
+    var wrap = document.createElement('div');
+    wrap.className = 'soar-item';
+    wrap.appendChild(soarStateChip(approval.decision));
+    wrap.appendChild(soarLine(
+      approval.approval_id + ' — ' + approval.action_type +
+      ' (role: ' + approval.required_role + ', requested ' +
+      approval.requested_at + ')'));
+    return wrap;
+  }
+
+  function buildIncidentRow(incident) {
+    var wrap = document.createElement('div');
+    wrap.className = 'soar-item';
+    wrap.appendChild(soarStateChip(incident.status));
+    wrap.appendChild(soarLine(
+      incident.incident_id + ' — ' + incident.title + ' [' +
+      incident.severity + '] alerts: ' + (incident.alert_ids || []).join(', ')));
+    return wrap;
+  }
+
+  function buildAuditRow(entry) {
+    var wrap = document.createElement('div');
+    wrap.className = 'soar-item';
+    wrap.appendChild(soarLine(
+      entry.created_at + ' — ' + entry.actor + ' — ' + entry.event_type +
+      (entry.from_state ? ' · ' + entry.from_state + ' → ' + entry.to_state : '') +
+      (entry.dry_run ? ' · DRY RUN' : ' · REAL'), 'meta'));
+    if (entry.failure_reason) {
+      wrap.appendChild(soarLine(entry.failure_reason, 'meta soar-err'));
+    }
+    return wrap;
+  }
+
+  function fetchSoar() {
+    var playbooks = fetchJSON('/api/playbooks').then(function (data) {
+      soarFillList('soar-playbooks', data.playbooks || [], buildPlaybookRow);
+    });
+    var executions = fetchJSON('/api/soar/executions?limit=10').then(function (data) {
+      soarFillList('soar-executions', data.executions || [], buildExecutionRow);
+    });
+    var approvals = fetchJSON('/api/soar/approvals?decision=pending&limit=10')
+      .then(function (data) {
+        soarFillList('soar-approvals', data.approvals || [], buildApprovalRow);
+      });
+    var incidents = fetchJSON('/api/incidents?limit=10').then(function (data) {
+      soarFillList('soar-incidents', data.incidents || [], buildIncidentRow);
+    });
+    var audit = fetchJSON('/api/soar/executions').then(function (data) {
+      var ids = (data.executions || []).slice(0, 10)
+        .map(function (execution) { return execution.execution_id; });
+      return Promise.all(ids.map(function (id) {
+        return fetchJSON('/api/soar/executions/' + encodeURIComponent(id) +
+          '/audit');
+      })).then(function (batches) {
+        var rows = [].concat.apply([], batches.map(function (batch) {
+          return batch.audit || [];
+        }));
+        soarFillList('soar-audit', rows, buildAuditRow);
+      });
+    });
+    return Promise.all([
+      playbooks, executions, approvals, incidents,
+      audit.catch(function () { soarFillList('soar-audit', [], buildAuditRow); })
+    ]).catch(function () {
+      ['soar-playbooks', 'soar-executions', 'soar-approvals',
+        'soar-incidents'].forEach(function (id) {
+        soarFillList(id, [], function () {
+          return soarLine('SOAR data unavailable.', 'meta');
+        });
+      });
+    });
+  }
+
   filterSel.addEventListener('change', fetchAlerts);
   document.getElementById('refreshBtn').addEventListener('click', fetchAlerts);
   setInterval(fetchAlerts, 1500);
   fetchAlerts();
+  fetchSoar();
+  setInterval(fetchSoar, 5000);
 })();

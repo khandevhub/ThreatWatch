@@ -24,6 +24,10 @@ from retrieval import KnowledgeRetriever, RetrievalError
 from vector_store import KNOWLEDGE_DB_DEFAULT, VectorStore
 
 from security_config import load_ingest_token, validate_ingest_token
+from soar import (ApprovalExpiredError, ApprovalNotFoundError,
+                  DuplicateExecution, ExecutionNotFoundError,
+                  PlaybookNotFoundError, SOAREngine, SOARError,
+                  USER_ACTOR_RE)
 
 logger = logging.getLogger('threatwatch.api')
 MAX_INGEST_REQUESTS_PER_MINUTE = 120
@@ -418,6 +422,181 @@ def create_app(config=None):
             logger.exception('AI hunt failed unexpectedly')
             return jsonify(error='ai_hunt_unavailable'), 503
         return jsonify(outcome)
+
+    # -- Phase 5: SOAR automation framework (read-only public, bearer-
+    # protected writes; dry-run by default; AI cannot execute actions) --
+
+    def _soar_engine():
+        return SOAREngine(db_file=application.config['DB_FILE'])
+
+    def _alert_row_or_none(alert_id):
+        with connect(application.config['DB_FILE']) as connection:
+            row = connection.execute(
+                'SELECT * FROM alerts WHERE id = ?', (alert_id,)).fetchone()
+        return dict(row) if row else None
+
+    @application.get('/api/playbooks')
+    def api_playbooks():
+        engine = _soar_engine()
+        engine.register_built_ins()
+        return jsonify({'playbooks': engine.list_playbooks()})
+
+    @application.get('/api/playbooks/<playbook_id>')
+    def api_playbook_detail(playbook_id):
+        engine = _soar_engine()
+        engine.register_built_ins()
+        playbook = engine.get_playbook(playbook_id)
+        if playbook is None:
+            return jsonify(error='playbook_not_found'), 404
+        return jsonify(playbook)
+
+    @application.post('/api/playbooks/<playbook_id>/execute')
+    def api_execute_playbook(playbook_id):
+        # Executions are an external effect: bearer-protected.
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        engine = _soar_engine()
+        engine.register_built_ins()
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            return jsonify(error='invalid_request',
+                           message='body must be a JSON object'), 400
+        alert_id = body.get('alert_id')
+        if not isinstance(alert_id, int) or isinstance(alert_id, bool):
+            return jsonify(error='invalid_request',
+                           message='alert_id must be an integer'), 400
+        dry_run = body.get('dry_run', True)
+        if not isinstance(dry_run, bool):
+            return jsonify(error='invalid_request',
+                           message='dry_run must be a boolean'), 400
+        actor = body.get('actor', 'api')
+        if not isinstance(actor, str) or not USER_ACTOR_RE.match(actor):
+            return jsonify(error='invalid_request',
+                           message='actor must be a bounded logical username'), 400
+        alert = _alert_row_or_none(alert_id)
+        if alert is None:
+            return jsonify(error='alert_not_found'), 404
+        try:
+            execution = engine.start_execution(
+                playbook_id, alert, dry_run=dry_run, actor=actor)
+        except PlaybookNotFoundError:
+            return jsonify(error='playbook_not_found'), 404
+        except SOARError as exc:
+            message = str(exc)
+            status = 409 if isinstance(exc, DuplicateExecution) else 400
+            error = ('duplicate_execution' if isinstance(exc, DuplicateExecution)
+                     else 'execution_rejected')
+            payload = {'error': error, 'message': message}
+            if isinstance(exc, DuplicateExecution):
+                payload['existing_execution_id'] = exc.existing_execution_id
+            return jsonify(payload), status
+        return jsonify(execution), 202
+
+    @application.get('/api/soar/executions')
+    def api_soar_executions():
+        engine = _soar_engine()
+        limit = request.args.get('limit', type=int) or 50
+        alert_id = request.args.get('alert_id', type=int)
+        return jsonify({'executions': engine.list_executions(
+            limit=limit, alert_id=alert_id)})
+
+    @application.get('/api/soar/executions/<execution_id>')
+    def api_soar_execution_detail(execution_id):
+        execution = _soar_engine().get_execution(execution_id)
+        if execution is None:
+            return jsonify(error='execution_not_found'), 404
+        return jsonify(execution)
+
+    @application.get('/api/soar/executions/<execution_id>/audit')
+    def api_soar_execution_audit(execution_id):
+        engine = _soar_engine()
+        if engine.get_execution(execution_id) is None:
+            return jsonify(error='execution_not_found'), 404
+        limit = request.args.get('limit', type=int) or 100
+        return jsonify({'execution_id': execution_id,
+                        'audit': engine.list_audit(execution_id, limit=limit)})
+
+    @application.post('/api/soar/executions/<execution_id>/cancel')
+    def api_soar_cancel_execution(execution_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True) or {}
+        actor = body.get('actor', 'api') if isinstance(body, dict) else 'api'
+        if not isinstance(actor, str) or not USER_ACTOR_RE.match(actor):
+            return jsonify(error='invalid_request',
+                           message='actor must be a bounded logical username'), 400
+        reason = body.get('reason') if isinstance(body, dict) else None
+        try:
+            execution = _soar_engine().cancel_execution(
+                execution_id, actor, reason=reason)
+        except ExecutionNotFoundError:
+            return jsonify(error='execution_not_found'), 404
+        except SOARError as exc:
+            return jsonify(error='invalid_state_transition',
+                           message=str(exc)), 409
+        return jsonify(execution)
+
+    @application.get('/api/soar/approvals')
+    def api_soar_approvals():
+        decision = request.args.get('decision') or None
+        try:
+            approvals = _soar_engine().list_approvals(
+                decision=decision,
+                limit=request.args.get('limit', type=int) or 50)
+        except SOARError as exc:
+            return jsonify(error='invalid_request', message=str(exc)), 400
+        return jsonify({'approvals': approvals})
+
+    @application.post('/api/soar/approvals/<approval_id>/approve')
+    def api_soar_approve(approval_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        return _decide_approval(approval_id, 'approved')
+
+    @application.post('/api/soar/approvals/<approval_id>/reject')
+    def api_soar_reject(approval_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        return _decide_approval(approval_id, 'rejected')
+
+    def _decide_approval(approval_id, decision):
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            return jsonify(error='invalid_request',
+                           message='body must be a JSON object'), 400
+        approver = body.get('approver')
+        if not isinstance(approver, str) or not USER_ACTOR_RE.match(approver):
+            return jsonify(error='invalid_request',
+                           message='approver must be a bounded logical username'), 400
+        try:
+            execution = _soar_engine().decide_approval(
+                approval_id, decision, approver,
+                reason=body.get('reason'))
+        except ApprovalNotFoundError:
+            return jsonify(error='approval_not_found'), 404
+        except ApprovalExpiredError:
+            return jsonify(error='approval_expired'), 409
+        except SOARError as exc:
+            return jsonify(error='invalid_state_transition',
+                           message=str(exc)), 409
+        return jsonify(execution)
+
+    @application.get('/api/incidents')
+    def api_incidents():
+        engine = _soar_engine()
+        return jsonify({'incidents': engine.incident_service.list_incidents(
+            limit=request.args.get('limit', type=int) or 50)})
+
+    @application.get('/api/incidents/<incident_id>')
+    def api_incident_detail(incident_id):
+        incident = _soar_engine().incident_service.get_incident(incident_id)
+        if incident is None:
+            return jsonify(error='incident_not_found'), 404
+        return jsonify(incident)
 
     @application.get('/api/alerts/<int:alert_id>/investigation')
     def api_alert_investigation(alert_id):

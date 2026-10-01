@@ -33,6 +33,33 @@
   </div>
   <div id='alerts'></div>
   <div id='lastUpdate' class='meta last-update'></div>
+  <div class='soar-section' id='soar-section'>
+    <h2>SOAR Automation</h2>
+    <p class='meta soar-note'>Dry-run mode is ON by default. No real containment
+      (host isolation, account changes, firewall changes) is enabled in this
+      phase — response adapters are simulated only. Playbook executions pause
+      for human approval before any gated action.</p>
+    <div class='soar-grid'>
+      <div class='soar-col'>
+        <h3>Playbooks</h3>
+        <div id='soar-playbooks' class='soar-list'></div>
+      </div>
+      <div class='soar-col'>
+        <h3>Recent executions</h3>
+        <div id='soar-executions' class='soar-list'></div>
+      </div>
+      <div class='soar-col'>
+        <h3>Pending approvals</h3>
+        <div id='soar-approvals' class='soar-list'></div>
+      </div>
+      <div class='soar-col'>
+        <h3>Incidents</h3>
+        <div id='soar-incidents' class='soar-list'></div>
+      </div>
+    </div>
+    <h3>SOAR audit history</h3>
+    <div id='soar-audit' class='soar-list'></div>
+  </div>
 </div>
 </body>
 </html>

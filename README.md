@@ -520,6 +520,161 @@ The script refuses to run without explicit configuration, never prints the
 key, and never modifies data. The automated test suite is fully offline and
 uses `MockLLMProvider` exclusively.
 
+## SOC automation / SOAR (Phase 5)
+
+> **REAL DESTRUCTIVE RESPONSE INTEGRATIONS ARE NOT ENABLED IN THIS PHASE.**
+> There is no real host isolation, no real account disabling, no real firewall
+> modification, no shell/SQL/URL execution, and no external ticketing or email
+> delivery. Every destructive-type adapter **fails closed** unless dry-run mode
+> is active, and dry-run mode is **ON by default for every execution**.
+
+Phase 5 adds a safe, auditable, approval-aware playbook (SOAR) framework on top
+of the existing alert/investigation surfaces. The deterministic SOAR engine —
+never the AI layer — controls execution.
+
+### Architecture
+
+- `playbook.py` — playbook definitions, trigger engine, policy engine, built-in playbooks.
+- `actions.py` — the `ActionProvider` abstraction and all action implementations (mock/safe only).
+- `soar.py` — the execution engine: state machine, approvals, idempotency, evidence, incidents, audit, AI recommendation boundary.
+- `database.py` — schema v4 tables: `soar_playbooks`, `soar_executions` (unique `idempotency_key`), `soar_execution_actions` (unique `execution_id+action_index`), `soar_approvals`, `soar_incidents` (unique `title+correlation_id`), `soar_audit`, plus indexes.
+- `app.py` — read-only public playbook/execution/approval/incident endpoints; every state-changing endpoint requires the ingest bearer token.
+
+### Playbook model
+
+A playbook is a versioned JSON definition: `playbook_id` (`TW-PB-NNN`), `name`,
+`description`, `version` (int ≥ 1), `enabled`, `triggers` (≤ 5),
+`approval_policy` (`none` / `analyst` / `administrator`), ordered `actions`
+(≤ 20), `timeout_seconds` (1–600), `retry` (`max_attempts` 1–4, `delay_seconds`
+0–60, `retryable`), `failure_policy` (`stop` / `continue`), and bounded
+parameters (≤ 4000 JSON chars). Definitions are validated **fail-closed at
+definition time** — every action's parameters are checked against the provider
+schema before the playbook can be saved, and each saved version has a canonical
+SHA-256 `definition_hash`.
+
+Built-ins: `TW-PB-001` *Brute Force Response* (trigger rule `TW-001`; analyst
+approval; collect evidence → create incident → notify → request approval for
+containment) and `TW-PB-002` *Suspicious PowerShell Triage* (trigger rule
+`TW-005`; no approval; `failure_policy: continue`). Built-ins are registered
+idempotently.
+
+### Trigger engine
+
+Deterministic, declarative triggers only — no arbitrary Python expressions, no
+code execution, no user-supplied commands. Supported trigger types: `alert_created`,
+`rule_id` (`TW-\d{3}`), `attack_category`, `priority_at_least`
+(low/medium/high/critical), `severity_at_least` (LOW/MEDIUM/HIGH),
+`investigation_status`, `threat_intel_match`, and `correlation_count_at_least`
+(1–1000), with `equals` / `not_equals` / `in` / `not_in` operators. A playbook
+fires when **any** trigger matches (OR).
+
+### Action model
+
+Every action is an allowlisted `ActionProvider` with an ID, name, description,
+parameter schema, `validate()`, dry-run behavior, `execute()`, and a bounded
+result. Providers are isolated — the playbook engine contains no
+provider-specific logic. Available action types: `log`, `collect_evidence`,
+`notify`, `create_incident`, `request_approval`, `noop`, and five future-facing
+adapters that are **structure-only in this phase**: `host_isolation`,
+`account_action`, `firewall_block`, `send_email`, `create_ticket`. Unknown
+parameters are rejected; error messages are redacted and bounded (300 chars).
+
+Notifications use the `NotificationProvider` seam with
+`MockNotificationProvider` (records only real sends, bounded history) and
+`DisabledNotificationProvider`. Host isolation, account actions, firewall,
+email, and ticketing providers are mock/disabled/dry-run only — see the
+disclaimer above.
+
+### Dry-run mode
+
+Dry-run is **mandatory and defaults to ON**. Every execution records
+`dry_run: true|false`, and every playbook must be testable entirely in dry-run.
+In dry-run, actions return `would_execute: true|false`, the parameters, a
+reason, and an `expected_effect` (e.g. `"simulated host isolation of <host>"`)
+— with **no external changes of any kind**. Only an explicitly authenticated
+human request (`"dry_run": false`) can attempt a non-dry-run execution, and even
+then destructive adapters fail closed (`not_supported`) because no real
+integrations exist in this phase.
+
+### Approval model
+
+Actions may require no approval, analyst approval, or administrator approval,
+per playbook policy. An approval record contains the approval ID, execution ID,
+action ID, requested time, requester, approver, decision, decision time, reason,
+and expiration (60-minute default TTL; approvals can be expired by a
+sweep or by deciding). States: `pending` → `approved` / `rejected` /
+`expired` / `cancelled`. Approval is granted only through an authenticated
+human API call — **it is never inferred from AI output**, and an approval cannot
+bypass policy (policy only ever tightens). Gated executions park in
+`WAITING_APPROVAL` before anything runs.
+
+### Execution lifecycle
+
+```
+PENDING → VALIDATING → WAITING_APPROVAL → APPROVED → RUNNING → SUCCEEDED
+              \                                                    \
+           VALIDATION_FAILED                                 ACTION_FAILED
+WAITING_APPROVAL → APPROVAL_REJECTED / APPROVAL_EXPIRED
+any non-terminal state → CANCELLED ; RUNNING → TIMED_OUT
+```
+
+Invalid transitions are rejected (`InvalidStateTransition`), terminal states are
+final, and every transition writes a `soar_audit` row: execution ID, playbook
+ID/version, action, alert ID, investigation ID, actor, from→to state, timestamp,
+dry-run status, approval state, bounded result JSON (≤ 4000 chars), and a
+redacted, bounded failure reason. Retries honor the playbook policy (attempts,
+delay, retryable set; `validation_error`/`not_supported`/`cancelled` are never
+retried), and failed attempts are individually audited — nothing fails
+silently.
+
+### Evidence, incidents, and audit
+
+At execution start the engine freezes an immutable evidence package (EV-… ID):
+the alert snapshot, bounded timeline head, bounded threat-intel / ATT&CK /
+related-alert sections, risk score, the Jev decision, the playbook trigger and
+context, and later action results — shrunk under a 20 000-char cap and never
+mutated afterwards. Incidents (`INC-…`) deterministically connect alerts,
+correlations, investigations, evidence, executions, actions, and approvals, and
+are deduplicated on `(title, correlation_id)`. Secrets (keys, tokens,
+passwords, credentials, authorization/API-key fields) are redacted everywhere:
+action results, audit rows, failure reasons, and AI recommendations.
+
+### AI / Jev boundary
+
+The AI copilot remains advisory. `recommend_execution` lets an AI **recommend**
+a playbook run for an alert: it always executes as a **dry-run**
+(`dry_run=True`, non-overridable), is audited with actor `ai-recommendation`,
+and its output is recursively secret-redacted and size-bounded. AI cannot
+execute actions, bypass approval, modify playbooks or policies, alter audit
+logs, choose arbitrary providers, or supply commands. The path is always:
+AI recommendation → validated action candidate → policy evaluation → approval
+requirement → human approval → allowlisted provider → execution.
+
+### Idempotency, cancellation, and API
+
+Executions are idempotent per `(playbook, version, alert, correlation)` via a
+SHA-256 idempotency key — a repeat trigger returns the existing execution
+(`409 duplicate_execution` with its ID). Authenticated humans can cancel a
+non-terminal execution (pending actions and approvals become `cancelled`).
+API surface (read-only GETs are unauthenticated like the rest of the dashboard;
+state changes require the bearer token):
+
+| Endpoint | Auth | Behavior |
+|---|---|---|
+| `GET /api/playbooks`, `GET /api/playbooks/<id>` | none | List/show playbook definitions |
+| `POST /api/playbooks/<id>/execute` | bearer | Body `{"alert_id": <int>, "dry_run": true?, "actor": "..."}`; `202` execution, `409 duplicate_execution`, `404` alert/playbook |
+| `GET /api/soar/executions[?alert_id=&limit=]`, `GET /api/soar/executions/<id>` | none | Execution views incl. actions/approvals |
+| `GET /api/soar/executions/<id>/audit` | none | Audit trail for one execution |
+| `POST /api/soar/executions/<id>/cancel` | bearer | Cancel non-terminal execution |
+| `GET /api/soar/approvals[?decision=]` | none | Pending/history approvals |
+| `POST /api/soar/approvals/<id>/approve` / `/reject` | bearer | Human decision; `409 approval_expired` after TTL |
+| `GET /api/incidents`, `GET /api/incidents/<id>` | none | Incident records |
+
+The dashboard gains a SOAR panel (playbooks, executions with explicit **DRY RUN**
+vs **REAL EXECUTION** labels, approvals, incidents, audit trail) rendered
+exclusively with text nodes. All SOAR writes are parameterized and transactional
+via `database.connect()`.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -572,9 +727,17 @@ validation, structured-response validation matrix, grounding/anti-fabrication,
 prompt-injection-as-data, the RAG investigation pipeline with mock providers,
 caching/invalidation, AI reports, recommendations, AI hunting translation and
 summary degradation, AI endpoint auth/validation/disabled states, and dashboard
-advisory-label safety) — all offline via `MockLLMProvider`.
+advisory-label safety) — all offline via `MockLLMProvider`. Phase 5 adds SOAR
+coverage: playbook validation (malformed definitions, bounds, unknown
+actions/params), trigger matching, provider validation/dry-run/failure/retry,
+the approval lifecycle (grant/reject/expiry/cancel, policy tightening), the
+execution state machine, idempotency/duplicate prevention, audit redaction,
+evidence immutability, incident dedupe, every SOAR API path
+(auth/validation/404/409), and the security suite (injection payloads, secret
+leakage, oversized bounds, adapter fail-closed behavior, the AI dry-run
+boundary).
 
-Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v3, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (embedding providers incl. optional semantic), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `llm_provider.py` (LLM provider seam), `ai_investigation.py` (RAG investigation engine, validation, grounding, report), `ai_hunting.py` (AI-assisted hunting), `knowledge_admin.py` (index admin CLI), `tools/ai_smoke_test.py` (optional live-LLM smoke test), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search, AI copilot endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v4, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (embedding providers incl. optional semantic), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `llm_provider.py` (LLM provider seam), `ai_investigation.py` (RAG investigation engine, validation, grounding, report), `ai_hunting.py` (AI-assisted hunting), `knowledge_admin.py` (index admin CLI), `tools/ai_smoke_test.py` (optional live-LLM smoke test), `actions.py`, `playbook.py`, and `soar.py` (Phase 5 SOAR action providers, playbook/trigger/policy engines, and execution engine), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search, AI copilot and SOAR endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
 
 ## Current limitations
 
@@ -582,8 +745,11 @@ Important files: `event_model.py` (versioned validation/normalization), `databas
 - Traffic spikes still fire on event type, not a measured baseline.
 - Threat intelligence remains a small static CSV without feed lifecycle, expiry, or history; enrichment is exact-match only.
 - Correlation is indicator-based within the SQLite/local deployment; there is no distributed streaming, and suppression state is per-database.
-- Jev is advisory only; there is no autonomous response, blocking, or SOAR. Phase 3 adds a deterministic offline AI-perspective seam only — no chatbot or external AI calls in the investigation layer.
-- The Phase 4 retrieval foundation is a data layer; the Phase 4E–4K AI copilot is **advisory only** and can be wrong. It is not autonomous, cannot execute actions, and never overrides deterministic detection, risk, Jev, or the investigation lifecycle. No SOAR, playbooks, or automated remediation exist.
+- Jev is advisory only; there is no autonomous response or blocking. Phase 3 adds a deterministic offline AI-perspective seam only — no chatbot or external AI calls in the investigation layer.
+- The Phase 4 retrieval foundation is a data layer; the Phase 4E–4K AI copilot is **advisory only** and can be wrong. It is not autonomous, cannot execute actions, and never overrides deterministic detection, risk, Jev, or the investigation lifecycle.
+- Phase 5 adds an approval-aware SOAR **framework** with dry-run default ON; real destructive response integrations are not enabled. Host isolation, account action, firewall, email, and ticketing adapters are mock/disabled/dry-run only, and no action executes shell commands, SQL, or arbitrary URLs.
+- The SOAR engine is an in-process scheduler: approval-TTL expiry is an on-demand sweep and retries/timeouts use bounded in-process waits — there is no distributed worker queue or external scheduler.
+- The SOAR layer has no RBAC beyond the shared bearer token; keep the dashboard and SOAR APIs on loopback or add an authenticated access layer before any remote exposure.
 - The AI layer makes external calls only when explicitly configured (`AI_LLM_PROVIDER=openai-compatible` + key); the default, the test suite, and all offline modes make zero network calls. The real embedding provider is optional (`uv sync --extra semantic`) and downloads its model once on first use.
 - The `local-hash` embedding is a deterministic bag-of-features substitute, not a semantic transformer model — retrieval quality reflects term overlap; switch to `local-semantic` for true semantic retrieval (requires reindexing into a fresh store).
 - The vector store is a single-file SQLite index with in-process cosine search; it is not a distributed or approximate-nearest-neighbor engine, and indexes are per-database file.
