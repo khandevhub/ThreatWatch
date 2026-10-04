@@ -2,43 +2,219 @@
 <html>
 <head>
   <meta charset='utf-8'>
-  <title>ThreatWatch — Dashboard</title>
+  <title>ThreatWatch — SOC Command Center</title>
   <meta name='viewport' content='width=device-width, initial-scale=1'>
   <link rel='stylesheet' href='/static/style.css'>
-  <script src='https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js' defer></script>
   <script src='/static/dashboard.js' defer></script>
 </head>
 <body>
 <div class='container'>
-  <h1>ThreatWatch — Mini SOC</h1>
-  <div class='toprow'>
-    <div class='counters'>
-      <div class='counter'>Total Alerts: <span id='total'>0</span></div>
-      <div class='counter'>High: <span id='high'>0</span></div>
-      <div class='counter'>Medium: <span id='med'>0</span></div>
-      <div class='counter'>Low: <span id='low'>0</span></div>
+
+  <!-- ============ TOP COMMAND BAR ============ -->
+  <header class='topbar'>
+    <div class='brand'>
+      <span class='brand-mark'>◆</span>
+      <span class='brand-name'>THREATWATCH <em>SOC</em></span>
+      <span class='brand-sub'>synthetic security validation environment</span>
     </div>
-    <div class='chartwrap'><canvas id='chart' width='300' height='200'></canvas></div>
-  </div>
-  <div class='filters'>
-    <label>Filter:
-      <select id='filter'>
-        <option value='all'>All</option>
-        <option value='HIGH'>HIGH</option>
-        <option value='MEDIUM'>MEDIUM</option>
-        <option value='LOW'>LOW</option>
-      </select>
-      <button id='refreshBtn' type='button'>Refresh now</button>
+    <div class='topbar-status'>
+      <span class='pill pill-ok' id='pill-system'>SYSTEM ONLINE</span>
+      <span class='pill' id='pill-sim'>SIM: READY</span>
+      <span class='pill pill-ok' id='pill-detection'>DETECTION: ONLINE</span>
+      <span class='pill' id='pill-jev'>JEV: STANDBY</span>
+      <span class='pill' id='pill-ai'>AI: DISABLED</span>
+      <span class='pill pill-dry' id='pill-soar'>SOAR: DRY RUN</span>
+    </div>
+    <div class='topbar-counters'>
+      <span class='tb-counter'><b id='tb-events'>0</b> events</span>
+      <span class='tb-counter'><b id='tb-eps'>0</b> ev/s</span>
+      <span class='tb-counter'><b id='tb-alerts'>0</b> alerts</span>
+      <span class='tb-counter tb-crit' id='tb-crit-high'>0 crit/high</span>
+      <span class='tb-counter'><b id='tb-investigations'>0</b> investigations</span>
+      <span class='tb-counter'><b id='tb-incidents'>0</b> incidents</span>
+      <span class='tb-counter tb-warn' id='tb-approvals'>0 approvals pending</span>
+    </div>
+    <div class='topbar-right'>
+      <span class='meta' id='tb-last-event'>last event: —</span>
+      <span class='meta' id='tb-refresh'>auto-refresh: on</span>
+    </div>
+  </header>
+
+  <div class='console-token'>
+    <label>Console token (protected actions):
+      <input type='password' id='console-token' placeholder='INGEST_TOKEN value' autocomplete='off'>
     </label>
+    <span id='token-hint' class='meta'></span>
   </div>
-  <div id='alerts'></div>
-  <div id='lastUpdate' class='meta last-update'></div>
-  <div class='soar-section' id='soar-section'>
-    <h2>SOAR Automation</h2>
+
+  <p class='env-banner'>THIS IS A SYNTHETIC SECURITY VALIDATION ENVIRONMENT. This console
+    only processes synthetic events generated in the Simulation Lab; no real attacks are
+    generated, no external systems are contacted, and all SOAR response actions are
+    dry-run simulations.</p>
+
+  <!-- ============ DEFENSIVE AUTOMATION WORKERS ============ -->
+  <section class='panel'>
+    <h2>SOC Automation Workers</h2>
+    <div class='workers' id='soc-workers'></div>
+  </section>
+
+  <!-- ============ ROW: METRICS + DISTRIBUTIONS ============ -->
+  <section class='panel'>
+    <h2>SOC Overview</h2>
+    <div class='soc-metrics' id='soc-metrics'>
+      <div class='metric'><div class='metric-value' id='soc-total'>0</div><div class='metric-label'>Total alerts</div></div>
+      <div class='metric metric-high'><div class='metric-value' id='soc-high'>0</div><div class='metric-label'>High</div></div>
+      <div class='metric metric-med'><div class='metric-value' id='soc-med'>0</div><div class='metric-label'>Medium</div></div>
+      <div class='metric metric-low'><div class='metric-value' id='soc-low'>0</div><div class='metric-label'>Low</div></div>
+      <div class='metric'><div class='metric-value' id='soc-active-inv'>0</div><div class='metric-label'>Active investigations</div></div>
+      <div class='metric'><div class='metric-value' id='soc-open-inc'>0</div><div class='metric-label'>Open incidents</div></div>
+      <div class='metric metric-warn'><div class='metric-value' id='soc-pending-approvals'>0</div><div class='metric-label'>Pending approvals</div></div>
+      <div class='metric'><div class='metric-value' id='soc-running-exec'>0</div><div class='metric-label'>Running executions</div></div>
+      <div class='metric'><div class='metric-value' id='soc-ai-inv'>0</div><div class='metric-label'>AI investigations</div></div>
+      <div class='metric'><div class='metric-value' id='soc-detection-events'>0</div><div class='metric-label'>Detection events</div></div>
+    </div>
+    <div class='bars-row'>
+      <div class='bars-box'>
+        <h3>Severity distribution</h3>
+        <div id='bar-severity' class='bars'></div>
+      </div>
+      <div class='bars-box'>
+        <h3>MITRE tactics / techniques</h3>
+        <div id='bar-mitre' class='bars'></div>
+      </div>
+      <div class='bars-box'>
+        <h3>Top source IPs</h3>
+        <div id='bar-sources' class='bars'></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ROW: LIVE EVENT STREAM + ALERT QUEUE ============ -->
+  <div class='two-col'>
+    <section class='panel'>
+      <h2>Live Event Stream <span class='live-dot' title='polling /api/events/recent'></span></h2>
+      <p class='meta'>Raw normalized telemetry (newest first). Simulated lab events are
+        labeled <span class='chip chip-sim'>LIVE SYNTHETIC</span>.</p>
+      <div id='event-stream' class='event-stream'></div>
+    </section>
+
+    <section class='panel'>
+      <h2>Alert Queue</h2>
+      <div class='filters'>
+        <label>Severity:
+          <select id='filter'>
+            <option value='all'>All</option>
+            <option value='HIGH'>HIGH</option>
+            <option value='MEDIUM'>MEDIUM</option>
+            <option value='LOW'>LOW</option>
+          </select>
+          <button id='refreshBtn' type='button'>Refresh now</button>
+        </label>
+      </div>
+      <div class='table-scroll'>
+        <table class='alert-queue' id='alert-queue-table'>
+          <thead>
+            <tr>
+              <th>Alert</th><th>Time</th><th>Rule</th><th>Category</th><th>Source</th>
+              <th>Target</th><th>Severity</th><th>Risk</th><th>Jev</th><th>AI</th>
+              <th>Investigation</th><th>Incident</th>
+            </tr>
+          </thead>
+          <tbody id='alert-queue'></tbody>
+        </table>
+      </div>
+      <div id='lastUpdate' class='meta last-update'></div>
+    </section>
+  </div>
+
+  <div id='alert-detail' class='alert-detail' hidden></div>
+
+  <!-- ============ ROW: SIMULATION LAB ============ -->
+  <section class='panel' id='sim-lab-panel'>
+    <h2>Attack Simulation Lab <span class='chip chip-sim'>CYBER RANGE — SYNTHETIC ONLY</span></h2>
+    <p class='meta'>Generates synthetic ThreatWatch events only — no commands are executed,
+      no network activity occurs, and no real systems are touched. Events flow through the
+      real pipeline: ingestion → normalization → detection → correlation → threat intel →
+      risk → Jev.</p>
+    <div class='sim-lab'>
+      <label>Scenario:
+        <select id='sim-scenario'></select>
+      </label>
+      <div id='sim-desc' class='meta sim-desc'></div>
+      <div class='sim-buttons'>
+        <button id='sim-generate' type='button'>Generate events</button>
+        <button id='sim-process' type='button' disabled>Process events</button>
+        <button id='sim-run-pipeline' type='button' class='btn-primary'>Run full pipeline ▶</button>
+      </div>
+      <div id='sim-progress' class='sim-progress'></div>
+      <div id='sim-result' class='sim-result'></div>
+      <div id='sim-pipeline' class='sim-pipeline'></div>
+      <div id='attack-path' class='attack-path'></div>
+    </div>
+  </section>
+
+  <!-- ============ DEMO MODE ============ -->
+  <section class='panel panel-demo'>
+    <h2>Demonstration Mode</h2>
+    <p class='meta'>One click walks the entire SOC lifecycle on real pipeline data:
+      benign baseline → synthetic brute force → detection → risk → Jev → AI (if
+      configured) → incident → SOAR dry-run → approval gate → audit.</p>
+    <div class='sim-buttons'>
+      <button id='demo-start' type='button' class='btn-primary'>▶ START SOC DEMO</button>
+      <button id='demo-reset' type='button' class='btn-danger'>⟲ RESET SOC DEMO</button>
+    </div>
+    <div id='demo-steps' class='demo-steps'></div>
+  </section>
+
+  <!-- ============ VALIDATION ============ -->
+  <section class='panel' id='validation-panel'>
+    <h2>SOC Validation</h2>
+    <p class='meta'>Deterministic comparison of expected vs actual pipeline results for
+      every scenario. A disabled AI provider is a warning, never a failure, when
+      deterministic detection succeeded. Designed false positives are surfaced as
+      warnings — never hidden.</p>
+    <div class='sim-buttons'>
+      <button id='val-run-all' type='button' class='btn-primary'>RUN FULL SOC VALIDATION (15 scenarios)</button>
+    </div>
+    <div id='val-progress' class='sim-progress'></div>
+    <div class='val-summary' id='val-summary'>
+      <div class='metric'><div class='metric-value' id='val-total'>0</div><div class='metric-label'>Runs</div></div>
+      <div class='metric metric-low'><div class='metric-value' id='val-passed'>0</div><div class='metric-label'>Passed</div></div>
+      <div class='metric metric-warn'><div class='metric-value' id='val-warning'>0</div><div class='metric-label'>Warnings</div></div>
+      <div class='metric metric-high'><div class='metric-value' id='val-failed'>0</div><div class='metric-label'>Failed</div></div>
+    </div>
+    <div class='table-scroll'>
+      <table class='val-table' id='val-table'>
+        <thead>
+          <tr><th>Scenario</th><th>Expected</th><th>Actual</th><th>Severity</th>
+              <th>Risk</th><th>Jev</th><th>MITRE</th><th>AI</th><th>Checks</th><th>Result</th></tr>
+        </thead>
+        <tbody id='val-table-body'></tbody>
+      </table>
+    </div>
+    <div id='val-runs' class='val-runs'></div>
+  </section>
+
+  <!-- ============ THREAT HUNT ============ -->
+  <section class='panel'>
+    <h2>Threat Hunt</h2>
+    <div class='hunt-lab'>
+      <label>What are you looking for?
+        <input type='text' id='hunt-query' maxlength='512'
+               placeholder='e.g. failed logins from 203.0.113.10'>
+      </label>
+      <button id='hunt-run' type='button'>Run hunt</button>
+      <div id='hunt-results' class='hunt-results'></div>
+    </div>
+  </section>
+
+  <!-- ============ SOAR / DEFENSE CENTER ============ -->
+  <section class='panel' id='soar-section'>
+    <h2>SOAR Defense Center</h2>
     <p class='meta soar-note'>Dry-run mode is ON by default. No real containment
-      (host isolation, account changes, firewall changes) is enabled in this
-      phase — response adapters are simulated only. Playbook executions pause
-      for human approval before any gated action.</p>
+      (host isolation, account changes, firewall changes) is enabled — response
+      adapters are simulated only. Playbook executions pause for human approval
+      before any gated action.</p>
     <div class='soar-grid'>
       <div class='soar-col'>
         <h3>Playbooks</h3>
@@ -57,9 +233,21 @@
         <div id='soar-incidents' class='soar-list'></div>
       </div>
     </div>
-    <h3>SOAR audit history</h3>
-    <div id='soar-audit' class='soar-list'></div>
-  </div>
+    <div id='incident-detail' class='incident-detail' hidden></div>
+    <h3>SOC audit trail</h3>
+    <div class='filters'>
+      <label>Filter audit — alert id:
+        <input type='text' id='audit-filter-alert' size='6' maxlength='10'>
+        actor: <input type='text' id='audit-filter-actor' size='12' maxlength='80'>
+      </label>
+    </div>
+    <div id='soc-audit' class='soar-list'></div>
+  </section>
+
+  <footer class='meta footer'>
+    ThreatWatch SOC console — deterministic detection + advisory AI. Synthetic telemetry,
+    dry-run response, human approval gates, full audit trail.
+  </footer>
 </div>
 </body>
 </html>

@@ -1,442 +1,1577 @@
 (function () {
+  'use strict';
   var chart = null;
   var filterSel = document.getElementById('filter');
   var lastUpdate = document.getElementById('lastUpdate');
+  var tokenInput = document.getElementById('console-token');
+  var currentAlertId = null;
+  var currentRunId = null;
   var severityClasses = { HIGH: 'high', MEDIUM: 'medium', LOW: 'low' };
 
-  function fetchJSON(url) {
-    return fetch(url).then(function (response) {
-      if (!response.ok) throw new Error('Request failed (' + response.status + ')');
+  function authHeaders() {
+    var headers = { 'Content-Type': 'application/json' };
+    var token = tokenInput && tokenInput.value.trim();
+    if (token) headers.Authorization = 'Bearer ' + token;
+    return headers;
+  }
+
+  function fetchJSON(url, options) {
+    options = options || {};
+    if (options.headers === undefined) options.headers = {};
+    return fetch(url, options).then(function (response) {
+      if (!response.ok) {
+        return response.json().catch(function () { return {}; }).then(function (body) {
+          var message = body.message || body.error || ('HTTP ' + response.status);
+          throw new Error(message);
+        });
+      }
       return response.json();
     });
   }
 
-  function buildAlertCard(alert) {
-    var card = document.createElement('div');
-    card.className = 'alert ' + (severityClasses[alert.severity] || 'unknown');
-    var meta = document.createElement('div');
-    meta.className = 'meta';
-    meta.textContent = alert.time + ' — ' + alert.rule + ' — ' + alert.severity;
-    var details = document.createElement('div');
-    details.className = 'details';
-    details.textContent = alert.details;
-    card.appendChild(meta);
-    card.appendChild(details);
-    var soc = buildSocLine(alert);
-    if (soc) card.appendChild(soc);
-    card.appendChild(buildInvestigateButton(alert));
-    return card;
+  function el(tag, className, text) {
+    var node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined && text !== null) node.textContent = String(text);
+    return node;
   }
 
-  function buildInvestigateButton(alert) {
-    var button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'investigate-btn';
-    button.textContent = 'Investigate';
-    button.addEventListener('click', function () {
-      toggleInvestigation(alert.id, button);
-    });
-    return button;
+  function line(text, className) {
+    return el('div', className || 'meta', text);
   }
 
-  function toggleInvestigation(alertId, button) {
-    var existing = document.getElementById('investigation-' + alertId);
-    if (existing) {
-      existing.remove();
-      button.textContent = 'Investigate';
-      return;
-    }
-    button.textContent = 'Loading...';
-    fetchJSON('/api/alerts/' + alertId + '/investigation').then(function (pkg) {
-      var panel = buildInvestigationPanel(pkg);
-      panel.id = 'investigation-' + alertId;
-      var container = document.getElementById('alerts');
-      var alertCard = button.closest('.alert');
-      if (alertCard && alertCard.parentNode === container) {
-        alertCard.parentNode.insertBefore(panel, alertCard.nextSibling);
-      } else {
-        container.appendChild(panel);
-      }
-      button.textContent = 'Close investigation';
-    }).catch(function () {
-      button.textContent = 'Investigation unavailable';
-    });
-  }
-
-  function addSection(panel, title) {
-    var heading = document.createElement('div');
-    heading.className = 'inv-section-title';
-    heading.textContent = title;
+  function addSection(panel, title, className) {
+    var heading = el('div', 'inv-section-title', title);
+    var body = el('div', 'inv-section' + (className ? ' ' + className : ''));
     panel.appendChild(heading);
-    var body = document.createElement('div');
-    body.className = 'inv-section';
     panel.appendChild(body);
     return body;
   }
 
   function addLines(container, lines) {
     lines.forEach(function (line) {
-      var item = document.createElement('div');
-      item.className = 'inv-line';
-      item.textContent = line;
+      var item;
+      if (line && line.nodeType) {
+        item = line;
+      } else {
+        item = el('div', 'inv-line');
+        item.textContent = line;
+      }
       container.appendChild(item);
     });
   }
 
-  function buildInvestigationPanel(pkg) {
-    var panel = document.createElement('div');
-    panel.className = 'investigation';
-    var evidence = (pkg && pkg.evidence) || {};
-    var entities = evidence.entities || {};
-    var risk = (pkg && pkg.risk) || {};
-
-    var header = addSection(panel, 'Investigation — alert #' + ((pkg.alert || {}).alert_id));
-    addLines(header, [
-      'Status: ' + ((pkg.alert || {}).investigation_status || 'unknown'),
-      'Risk: ' + (risk.score === null || risk.score === undefined ? 'unavailable' :
-        risk.score + '/100 (' + (risk.band || 'unknown') + ')'),
-    ]);
-    if (risk.explanation) addLines(header, [risk.explanation]);
-
-    var entityLines = [];
-    Object.keys(entities).forEach(function (kind) {
-      if (entities[kind] && entities[kind].length) {
-        entityLines.push(kind.replace(/_/g, ' ') + ': ' + entities[kind].join(', '));
-      }
-    });
-    if (entityLines.length) {
-      var entityBody = addSection(panel, 'Evidence (entities)');
-      addLines(entityBody, entityLines);
-    }
-    if (evidence.unavailable && evidence.unavailable.length) {
-      var missing = addSection(panel, 'Evidence unavailable');
-      addLines(missing, [evidence.unavailable.join(', ')]);
-    }
-
-    var intel = (pkg && pkg.threat_intel) || {};
-    if (intel.matches && intel.matches.length) {
-      var intelBody = addSection(panel, 'Threat intelligence');
-      addLines(intelBody, intel.matches.map(function (match) {
-        if (match.fields) {
-          return 'stored enrichment: ' + Object.keys(match.fields)
-            .map(function (key) { return key + '=' + match.fields[key]; }).join(', ');
-        }
-        return (match.known_malicious ? 'KNOWN ' : 'unknown ') +
-          match.indicator_type + ' ' + match.indicator +
-          ' (confidence ' + match.confidence + ')';
-      }));
-    }
-
-    var mitre = (pkg && pkg.mitre) || {};
-    if (mitre.techniques && mitre.techniques.length) {
-      var mitreBody = addSection(panel, 'MITRE ATT&CK');
-      addLines(mitreBody, mitre.techniques.map(function (technique) {
-        return technique.technique_id + ' ' + (technique.technique_name || '') +
-          (technique.suggested_next_step ? ' — ' + technique.suggested_next_step : '');
-      }));
-    }
-
-    var related = (pkg && pkg.related_alerts) || {};
-    if (related.alerts && related.alerts.length) {
-      var relatedBody = addSection(panel, 'Related alerts');
-      addLines(relatedBody, related.alerts.slice(0, 10).map(function (alert) {
-        return '#' + alert.alert_id + ' ' + alert.rule + ' (' + alert.severity +
-          ', ' + alert.relation + ')';
-      }));
-    }
-
-    var timeline = (pkg && pkg.timeline) || {};
-    if (timeline.entries && timeline.entries.length) {
-      var timelineBody = addSection(panel, 'Timeline (' + timeline.total_events + ' events)');
-      addLines(timelineBody, timeline.entries.slice(0, 10).map(function (entry) {
-        return (entry.timestamp || '(no timestamp)') + ' — ' +
-          (entry.event_type || '?') +
-          (entry.src_ip ? ' — ' + entry.src_ip : '') +
-          (entry.user ? ' — ' + entry.user : '');
-      }));
-    }
-
-    var questions = (pkg && pkg.investigation_questions) || [];
-    if (questions.length) {
-      var questionBody = addSection(panel, 'Suggested next steps');
-      addLines(questionBody, questions);
-    }
-    loadAiInvestigation((pkg.alert || {}).alert_id, panel);
-    return panel;
+  function textLines(values) {
+    return (values || []).map(function (value) { return line(value); });
   }
 
-  // -- Phase 4E-4K: advisory AI section (labeled AI-GENERATED; safe DOM only) --
+  // ------------------------------------------------------------------
+  // SOC overview metrics
+  // ------------------------------------------------------------------
 
-  function loadAiInvestigation(alertId, panel) {
-    if (typeof alertId !== 'number' || !alertId) return;
-    fetchJSON('/api/alerts/' + alertId + '/ai-investigation').then(function (ai) {
-      var body = addSection(panel, 'AI investigation \u2014 AI-GENERATED / ADVISORY');
-      body.className += ' ai-advisory';
-      if (!ai || ai.status !== 'ok') {
-        addLines(body, ['AI status: ' + ((ai && ai.status) || 'unavailable') +
-          (ai && ai.reason ? ' (' + ai.reason + ')' : '')]);
-        return;
-      }
-      addLines(body, aiLines(ai));
-    }).catch(function () {
-      var body = addSection(panel, 'AI investigation \u2014 AI-GENERATED / ADVISORY');
-      body.className += ' ai-advisory';
-      addLines(body, ['AI status: unavailable']);
-    });
-  }
-
-  function aiLines(ai) {
-    var response = ai.response || {};
-    var model = (ai.model || {}).model || 'unknown model';
-    var lines = [
-      'AI status: ok (model ' + model + ') \u2014 advisory only, can be wrong',
-      'Summary: ' + (response.summary || '(none)'),
-      'Assessment: ' + (response.assessment || '(none)'),
-      'AI priority: ' + (response.priority || 'unknown') +
-        ' | malicious likelihood: ' + formatLikelihood(response.malicious_likelihood) +
-        ' | false-positive likelihood: ' + formatLikelihood(response.false_positive_likelihood) +
-        ' | confidence: ' + formatLikelihood(response.confidence),
-    ];
-    if (ai.jev_context && ai.jev_context.priority) {
-      lines.push('Jev decision (deterministic, not AI): ' + ai.jev_context.priority);
-    }
-    (response.key_evidence || []).slice(0, 10).forEach(function (item, index) {
-      lines.push('Key evidence ' + (index + 1) + ': ' + item);
-    });
-    (response.mitre_assessment || []).slice(0, 10).forEach(function (entry) {
-      lines.push('ATT&CK ' + entry.technique_id + ': ' + entry.relevance +
-        (entry.rationale ? ' \u2014 ' + entry.rationale : ''));
-    });
-    (response.recommended_actions || []).slice(0, 10).forEach(function (action, index) {
-      lines.push('Recommended step ' + (index + 1) + ': ' + (action.action || '') +
-        (action.reason ? ' \u2014 ' + action.reason : ''));
-    });
-    if (response.source_references && response.source_references.length) {
-      response.source_references.slice(0, 10).forEach(function (reference) {
-        lines.push('Source (' + reference.type + '): ' + reference.value);
+  function updateOverview() {
+    return fetchJSON('/api/soc/overview').then(function (overview) {
+      var ids = {
+        total_alerts: 'soc-total', high_alerts: 'soc-high',
+        medium_alerts: 'soc-med', low_alerts: 'soc-low',
+        active_investigations: 'soc-active-inv',
+        open_incidents: 'soc-open-inc',
+        pending_approvals: 'soc-pending-approvals',
+        running_executions: 'soc-running-exec',
+        ai_investigations: 'soc-ai-inv',
+        detection_events: 'soc-detection-events',
+      };
+      Object.keys(ids).forEach(function (key) {
+        var node = document.getElementById(ids[key]);
+        if (node) node.textContent = String(overview[key]);
       });
-    } else {
-      lines.push('Sources: none cited by the model for this assessment');
-    }
-    return lines;
-  }
-
-  function formatLikelihood(value) {
-    return (value === null || value === undefined) ? '?' : String(value);
-  }
-
-  function buildSocLine(alert) {
-    var parts = [];
-    if (alert.deterministic_risk_score !== null && alert.deterministic_risk_score !== undefined) {
-      var band = alert.risk_band ? ' (' + alert.risk_band + ')' : '';
-      parts.push('risk ' + alert.deterministic_risk_score + '/100' + band);
-    }
-    if (alert.jev_priority) {
-      parts.push('jev: ' + alert.jev_priority);
-    }
-    if (alert.attack_category) {
-      parts.push('category: ' + alert.attack_category);
-    }
-    if (alert.mitre_techniques && alert.mitre_techniques.length) {
-      parts.push('ATT&CK: ' + alert.mitre_techniques.join(', '));
-    }
-    if (alert.investigation_status && alert.investigation_status !== 'new') {
-      parts.push('status: ' + alert.investigation_status);
-    }
-    if (!parts.length) return null;
-    var line = document.createElement('div');
-    line.className = 'meta soc-line';
-    line.textContent = parts.join(' \u00b7 ');
-    return line;
-  }
-
-  function updateCounters(alerts) {
-    document.getElementById('total').textContent = String(alerts.length);
-    var high = 0, med = 0, low = 0;
-    alerts.forEach(function (alert) {
-      if (alert.severity === 'HIGH') high++;
-      else if (alert.severity === 'MEDIUM') med++;
-      else if (alert.severity === 'LOW') low++;
-    });
-    document.getElementById('high').textContent = String(high);
-    document.getElementById('med').textContent = String(med);
-    document.getElementById('low').textContent = String(low);
-  }
-
-  function updateChart() {
-    return fetchJSON('/api/summary').then(function (summary) {
-      if (typeof Chart === 'undefined') return;
-      var labels = Object.keys(summary);
-      var values = labels.map(function (key) { return summary[key]; });
-      if (!chart) {
-        var context = document.getElementById('chart').getContext('2d');
-        chart = new Chart(context, {
-          type: 'bar',
-          data: { labels: labels, datasets: [{ label: 'Alerts', data: values }] },
-          options: { responsive: true }
-        });
-      } else {
-        chart.data.labels = labels;
-        chart.data.datasets[0].data = values;
-        chart.update();
+      // Top command-bar counters mirror the same real data.
+      var critical = overview.critical_alerts || 0;
+      var high = overview.high_alerts || 0;
+      var critHigh = document.getElementById('tb-crit-high');
+      if (critHigh) {
+        critHigh.textContent = (critical + high) + ' crit/high';
+        critHigh.className = 'tb-counter' + ((critical + high) > 0 ? ' tb-crit' : '');
       }
+      var tbAlerts = document.getElementById('tb-alerts');
+      if (tbAlerts) tbAlerts.textContent = String(overview.total_alerts || 0);
+      var tbEvents = document.getElementById('tb-events');
+      if (tbEvents) tbEvents.textContent = String(overview.detection_events || 0);
+      var tbInv = document.getElementById('tb-investigations');
+      if (tbInv) tbInv.textContent = String(overview.active_investigations || 0);
+      var tbInc = document.getElementById('tb-incidents');
+      if (tbInc) tbInc.textContent = String(overview.open_incidents || 0);
+      var tbAppr = document.getElementById('tb-approvals');
+      if (tbAppr) {
+        tbAppr.textContent = overview.pending_approvals + ' approvals pending';
+        tbAppr.className = 'tb-counter' + (overview.pending_approvals > 0 ? ' tb-warn' : '');
+      }
+      var aiPill = document.getElementById('pill-ai');
+      if (aiPill) {
+        var aiProvider = overview.ai_provider || 'disabled';
+        var aiLabel = aiProvider === 'mock' ? 'MOCK (ADVISORY)'
+          : (aiProvider === 'openai-compatible' ? 'LIVE (ADVISORY)' : 'DISABLED');
+        aiPill.textContent = 'AI: ' + aiLabel;
+        aiPill.className = 'pill' + (aiProvider !== 'disabled' ? ' pill-ok' : '');
+      }
+      renderSeverityBars(overview);
     });
   }
+
+  // ------------------------------------------------------------------
+  // Alert queue + detail
+  // ------------------------------------------------------------------
+
+  function severityChip(alert) {
+    return el('span', 'chip ' + (severityClasses[alert.severity] || 'unknown'),
+      alert.severity || '?');
+  }
+
+  function stateChip(state) {
+    var cls = state === 'ok' || state === 'SUCCEEDED' || state === 'approved' ? 'chip-ok' : '';
+    if (state === 'RUNNING' || state === 'APPROVED') cls = 'chip-run';
+    if (state === 'WAITING_APPROVAL' || state === 'PENDING' || state === 'pending') cls = 'chip-wait';
+    if (state === 'VALIDATION_FAILED' || state === 'rejected' || state === 'expired'
+      || state === 'ACTION_FAILED' || state === 'TIMED_OUT') cls = 'chip-bad';
+    return el('span', 'chip ' + cls, state || '?');
+  }
+
+  function queueCell(text, className) {
+    return el('td', className, text == null ? '—' : text);
+  }
+
+  function buildAlertRow(alert) {
+    var row = el('tr', 'queue-row');
+    row.appendChild(queueCell('#' + alert.id, 'queue-strong'));
+    row.appendChild(queueCell(alert.time));
+    row.appendChild(queueCell(alert.rule + (alert.rule_id ? ' (' + alert.rule_id + ')' : '')));
+    row.appendChild(queueCell(alert.attack_category));
+    var source = alert.source_ips && alert.source_ips.length ?
+      alert.source_ips.join(', ') : null;
+    row.appendChild(queueCell(source));
+    var target = (alert.affected_users && alert.affected_users.length ?
+      alert.affected_users.join(', ') : null) ||
+      (alert.hostnames && alert.hostnames.length ? alert.hostnames.join(', ') : null);
+    row.appendChild(queueCell(target));
+    row.appendChild(queueCell(null)).appendChild(severityChip(alert));
+    row.appendChild(queueCell(alert.deterministic_risk_score == null ?
+      '—' : alert.deterministic_risk_score + '/100'));
+    row.appendChild(queueCell(alert.jev_priority));
+    row.appendChild(queueCell(alert.ai_status === 'ok' ? 'AI done' : null,
+      alert.ai_status === 'ok' ? 'queue-ai-ok' : null));
+    row.appendChild(queueCell(alert.investigation_status));
+    row.appendChild(queueCell((alert.incident_ids && alert.incident_ids.length) ?
+      alert.incident_ids.join(', ') : null));
+    row.addEventListener('click', function () {
+      openAlertDetail(alert.id);
+    });
+    // Full detail text stays a text node (XSS-safe) as a second line in the
+    // rule cell.
+    var ruleCell = row.cells[2];
+    var details = document.createElement('div');
+    details.className = 'queue-details';
+    details.textContent = alert.details;
+    ruleCell.appendChild(details);
+    return row;
+  }
+
+  var latestAlerts = [];
 
   function fetchAlerts() {
-    return fetchJSON('/api/alerts').then(function (data) {
-      var alerts = Array.isArray(data) ? data : [];
+    return fetchJSON('/api/soc/alerts').then(function (alerts) {
+      var list = Array.isArray(alerts) ? alerts : [];
+      latestAlerts = list;
       var filter = filterSel.value;
-      var shown = alerts.filter(function (alert) {
+      var shown = list.filter(function (alert) {
         return filter === 'all' || alert.severity === filter;
       });
-      var container = document.getElementById('alerts');
-      container.replaceChildren.apply(container, shown.map(buildAlertCard));
-      updateCounters(alerts);
+      var tbody = document.getElementById('alert-queue');
+      tbody.replaceChildren.apply(tbody,
+        shown.length ? shown.map(buildAlertRow) : [emptyQueueRow()]);
       lastUpdate.textContent = 'Updated ' + new Date().toLocaleTimeString();
-      return updateChart().catch(function () {});
+      var totalNode = document.getElementById('soc-total');
+      if (totalNode) totalNode.textContent = String(list.length);
+      renderMitreBars(list);
+      renderSourceBars(list);
+      // Jev pill reflects the actual stored decision status of the newest alert.
+      var jevStatus = list.length ? (list[0].jev_status || '') : '';
+      if (jevStatus === 'fallback') {
+        setPill('pill-jev', 'JEV: FALLBACK (DETERMINISTIC)', 'pill-warn');
+      } else if (jevStatus) {
+        setPill('pill-jev', 'JEV: ACTIVE', 'pill-ok');
+      } else {
+        setPill('pill-jev', 'JEV: STANDBY', '');
+      }
     }).catch(function () {
       lastUpdate.textContent = 'Unable to load alerts. Check the local service.';
     });
   }
 
-  // -- Phase 5: SOAR section (read-only, safe DOM rendering) ------------
-
-  function soarLine(text, className) {
-    var div = document.createElement('div');
-    div.className = className || 'meta';
-    div.textContent = String(text == null ? '' : text);
-    return div;
+  function emptyQueueRow() {
+    var row = el('tr');
+    var cell = el('td', 'meta', 'No alerts yet — generate a scenario in the Simulation Lab below.');
+    cell.colSpan = 12;
+    row.appendChild(cell);
+    return row;
   }
 
-  function soarStateChip(state) {
-    var chip = document.createElement('span');
-    chip.className = 'soar-chip ' +
-      (state === 'SUCCEEDED' ? 'soar-ok' :
-        state === 'RUNNING' || state === 'APPROVED' ? 'soar-run' :
-        state === 'WAITING_APPROVAL' || state === 'PENDING' ? 'soar-wait' :
-        'soar-bad');
-    chip.textContent = String(state || '?');
-    return chip;
+  // ------------------------------------------------------------------
+  // Alert detail (consolidated analyst view)
+  // /api/soc/alerts/<id>/full
+  // ------------------------------------------------------------------
+
+  function openAlertDetail(alertId) {
+    currentAlertId = alertId;
+    var panel = document.getElementById('alert-detail');
+    panel.hidden = false;
+    panel.replaceChildren(line('Loading alert #' + alertId + ' …'));
+    panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    fetchJSON('/api/soc/alerts/' + encodeURIComponent(alertId) + '/full')
+      .then(function (full) { renderAlertDetail(panel, full); })
+      .catch(function (error) {
+        panel.replaceChildren(line('Unable to load alert detail: ' + error.message,
+          'meta soar-err'));
+      });
   }
 
-  function soarFillList(id, rows, build) {
+  function closeDetail() {
+    currentAlertId = null;
+    var panel = document.getElementById('alert-detail');
+    panel.hidden = true;
+    panel.replaceChildren();
+  }
+
+  function renderAlertDetail(panel, full) {
+    var alert = full.alert || {};
+    var soar = full.soar || {};
+    var ai = full.ai || {};
+    var investigation = full.investigation;
+    panel.replaceChildren();
+
+    var card = el('div', 'detail-head');
+    card.className = 'alert ' + (severityClasses[alert.severity] || 'unknown')
+      + ' detail-head';
+    var title = el('div', 'detail-title');
+    title.appendChild(severityChip(alert));
+    title.appendChild(el('span', 'detail-name',
+      ' Alert #' + alert.id + ' — ' + alert.rule + ' (' + (alert.rule_id || '?') + ')'));
+    var close = el('button', 'detail-close', 'Close');
+    close.type = 'button';
+    close.addEventListener('click', closeDetail);
+    var closeWrap = el('span', 'detail-close-wrap');
+    closeWrap.appendChild(close);
+    title.appendChild(closeWrap);
+    card.appendChild(title);
+    addLines(card, [
+      line('Time: ' + alert.time + '  ·  Details: ' + alert.details),
+      line('Risk: ' + (alert.deterministic_risk_score == null ? 'unavailable' :
+        alert.deterministic_risk_score + '/100 (' + (alert.risk_band || '?') + ')')
+        + (alert.risk_explanation ? ' — ' + alert.risk_explanation : '')),
+      line('Correlation: ' + (alert.correlation_id || '—') + '  ·  Investigation status: '
+        + (alert.investigation_status || '—')),
+      line('Entities: sources ' + ((alert.source_ips || []).join(', ') || '—')
+        + ' · users ' + ((alert.affected_users || []).join(', ') || '—')
+        + ' · hosts ' + ((alert.hostnames || []).join(', ') || '—')
+        + ' · processes ' + ((alert.processes || []).join(', ') || '—')),
+      intelLine(alert),
+    ]);
+    panel.appendChild(card);
+    if (currentAlertId !== alert.id) return;
+
+    // -- deterministic investigation + evidence (existing Phase 3 engine) --
+    if (investigation) {
+      var invPanel = el('div', 'investigation');
+      panel.appendChild(invPanel);
+      var invHead = addSection(invPanel, 'Investigation — deterministic evidence');
+      addLines(invHead, [
+        line('Timeline (' + ((investigation.timeline || {}).total_events || 0) + ' events):'),
+      ]);
+      var tl = (investigation.timeline || {}).entries || [];
+      tl.slice(0, 8).forEach(function (entry) {
+        invHead.appendChild(line('  ' + (entry.timestamp || '?') + ' — '
+          + (entry.event_type || '?')
+          + (entry.src_ip ? ' — ' + entry.src_ip : '')
+          + (entry.user ? ' — ' + entry.user : '')));
+      });
+      var mitigation = addSection(invPanel, 'Correlation / related alerts / intel');
+      addLines(mitigation, [
+        line('Related alerts: ' + ((((investigation.related_alerts || {}).alerts) || [])
+          .map(function (rel) { return '#' + rel.alert_id + ' ' + rel.rule; })
+          .join(', ') || 'none')),
+        line('Threat intel: ' + ((((investigation.threat_intel || {}).matches) || [])
+          .map(function (match) {
+            if (match.fields) {
+              return 'stored enrichment ' + Object.keys(match.fields)
+                .map(function (key) { return key + '=' + match.fields[key]; }).join(', ');
+            }
+            return (match.known_malicious ? 'KNOWN ' : 'unknown ') + match.indicator_type
+              + ' ' + match.indicator;
+          }).join(', ') || 'no stored intel match')),
+        line('MITRE ATT&CK (deterministic): ' + ((((investigation.mitre || {}).techniques) || [])
+          .map(function (tech) { return tech.technique_id; }).join(', ') || 'none')),
+        line('Investigation status transitions: ' + alert.investigation_status),
+      ]);
+      var questions = addSection(invPanel, 'Investigation questions');
+      addLines(questions, textLines(investigation.investigation_questions || []));
+      var askBody = addSection(invPanel, 'Ask about this alert (evidence-bounded)');
+      var askInput = el('input');
+      askInput.type = 'text';
+      askInput.maxLength = 256;
+      askInput.placeholder = 'Has this source IP attacked other accounts?';
+      askInput.className = 'ask-input';
+      var askBtn = el('button', '', 'Ask');
+      askBtn.type = 'button';
+      var askOut = el('div', 'ask-output');
+      askBtn.addEventListener('click', function () {
+        var question = askInput.value.trim();
+        if (!question) return;
+        askOut.replaceChildren(line('Checking stored evidence …'));
+        fetchJSON('/api/alerts/' + alert.id + '/ai-question', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ question: question }),
+        }).then(function (answer) {
+          askOut.replaceChildren(
+            line('Answer: ' + answer.answer, 'ask-ans'),
+            line('Basis: ' + (answer.basis || []).join(' | '), 'meta'));
+        }).catch(function (error) {
+          askOut.replaceChildren(line('Question failed: ' + error.message, 'meta soar-err'));
+        });
+      });
+      askBody.appendChild(askInput);
+      askBody.appendChild(askBtn);
+      askBody.appendChild(askOut);
+    }
+
+    // -- advisory AI panel (labeled AI-GENERATED / ADVISORY) --------------
+    var aiPanel = addSection(panel, 'THREATWATCH AI ANALYST — AI-GENERATED / ADVISORY',
+      'ai-advisory');
+    if (!ai || ai.status !== 'ok') {
+      addLines(aiPanel, [
+        line('AI status: ' + ((ai && ai.status) || 'unavailable')
+          + (ai && ai.reason ? ' (' + ai.reason + ')' : '')),
+        line('AI status: unavailable — configure AI to enable the advisory analyst.',
+          'meta'),
+      ]);
+    } else {
+      var response = ai.response || {};
+      var model = (ai.model || {}).model || 'unknown model';
+      addLines(aiPanel, [
+        line('AI status: ok (model ' + model + ') — advisory only, can be wrong'),
+        line('Summary: ' + (response.summary || '(none)')),
+        line('Assessment: ' + (response.assessment || '(none)')),
+        line('AI priority: ' + (response.priority || 'unknown')
+          + ' | malicious likelihood: ' + fmtLik(response.malicious_likelihood)
+          + ' | false-positive likelihood: ' + fmtLik(response.false_positive_likelihood)
+          + ' | confidence: ' + fmtLik(response.confidence)),
+        (ai.jev_context && ai.jev_context.priority)
+          ? line('Jev decision (deterministic, not AI): ' + ai.jev_context.priority)
+          : line('Jev decision (deterministic, not AI): unavailable'),
+      ]);
+      addLines(aiPanel, (response.key_evidence || []).slice(0, 8).map(function (item, i) {
+        return line('Key evidence ' + (i + 1) + ': ' + item);
+      }));
+      addLines(aiPanel, (response.mitre_assessment || []).slice(0, 8).map(function (entry) {
+        return line('ATT&CK ' + entry.technique_id + ': ' + entry.relevance
+          + (entry.rationale ? ' — ' + entry.rationale : ''));
+      }));
+      addLines(aiPanel, (response.recommended_actions || []).slice(0, 8).map(function (action, i) {
+        return line('Recommended step ' + (i + 1) + ': ' + (action.action || '')
+          + (action.reason ? ' — ' + action.reason : ''));
+      }));
+      if (response.source_references && response.source_references.length) {
+        addLines(aiPanel, response.source_references.slice(0, 10).map(function (reference) {
+          return line('Source (' + reference.type + '): ' + reference.value);
+        }));
+      } else {
+        addLines(aiPanel, [line('Sources: none cited by the model for this assessment')]);
+      }
+      var askAi = el('button', '', 'Run AI investigation');
+      askAi.type = 'button';
+      askAi.addEventListener('click', function () {
+        runAiInvestigation(alert.id, aiPanel);
+      });
+      aiPanel.appendChild(askAi);
+    }
+    if (currentAlertId !== alert.id) return;
+
+    // -- SOAR section: playbook suggestion, executions, approvals, audit --
+    // Wrapped in a .soar-region so refreshDetailSoar() can keep the open
+    // detail live (executions/approvals/audit) without re-rendering the
+    // whole panel or re-running the AI engine.
+    var soarRegion = el('div', 'soar-region');
+    panel.appendChild(soarRegion);
+    buildSoarRegion(soarRegion, alert, soar);
+  }
+
+  function buildSoarRegion(container, alert, soar) {
+    container.replaceChildren();
+    // Transient action feedback lives here so refreshDetailSoar() can
+    // rebuild the region without erasing it.
+    var status = el('div', 'soar-status');
+    container.appendChild(status);
+    var soarPanel = addSection(container, 'SOAR — playbook workflow');
+    addLines(soarPanel, [line('Matched playbooks: '
+      + ((soar.matched_playbooks || []).join(', ') || 'none'))]);
+    if (soar.playbook) {
+      var def = (soar.playbook.definition || {});
+      addLines(soarPanel, [
+        line('Suggested playbook: ' + soar.playbook.playbook_id + ' v'
+          + soar.playbook.version + ' — ' + soar.playbook.name
+          + ' (approval policy: ' + def.approval_policy + ', failure policy: '
+          + def.failure_policy + ')'),
+      ]);
+      (def.actions || []).forEach(function (action, index) {
+        soarPanel.appendChild(line('  ' + (index + 1) + '. ' + action.type
+          + (action.requires_approval ? '  [requires approval]' : '')
+          + (action.parameters && action.parameters.note ?
+            '  — ' + action.parameters.note : '')));
+      });
+      if (soar.recommendation) {
+        var rec = soar.recommendation;
+        addLines(soarPanel, [
+          line('Dry-run preview execution: ' + rec.execution_id + ' — state '
+            + rec.state + ' (DRY RUN — no external effect)'),
+        ]);
+      }
+      var executeBtn = el('button', 'soar-btn', 'Execute playbook (dry-run by default)');
+      executeBtn.type = 'button';
+      executeBtn.addEventListener('click', function () {
+        executePlaybook(soar.playbook.playbook_id, alert.id, status);
+      });
+      soarPanel.appendChild(executeBtn);
+    }
+    (soar.executions || []).forEach(function (execution) {
+      var row = el('div', 'soar-item');
+      row.appendChild(stateChip(execution.state));
+      row.appendChild(line(execution.execution_id + ' — ' + execution.playbook_id
+        + ' v' + execution.playbook_version + ' · '
+        + (execution.dry_run ? 'DRY RUN' : 'REAL EXECUTION')));
+      (execution.actions || []).forEach(function (action) {
+        row.appendChild(line('  action[' + action.action_index + '] ' + action.action_type
+          + ': ' + action.state + (action.result && action.result.dry_run !== undefined
+            ? '' : '') + (action.error ? ' — ' + action.error : ''),
+            'meta soar-action'));
+      });
+      soarPanel.appendChild(row);
+    });
+    (soar.approvals || []).forEach(function (approval) {
+      var row = el('div', 'soar-item');
+      row.appendChild(stateChip(approval.decision));
+      row.appendChild(line(approval.approval_id + ' — ' + approval.action_type
+        + ' (role: ' + approval.required_role + ', expires ' + approval.expires_at + ')'));
+      if (approval.decision === 'pending') {
+        var approve = el('button', 'soar-btn', 'Approve');
+        var reject = el('button', 'soar-btn soar-btn-bad', 'Reject');
+        approve.type = 'button';
+        reject.type = 'button';
+        approve.addEventListener('click', function () {
+          decideApproval(approval.approval_id, 'approve', status);
+        });
+        reject.addEventListener('click', function () {
+          decideApproval(approval.approval_id, 'reject', status);
+        });
+        row.appendChild(approve);
+        row.appendChild(reject);
+      }
+      soarPanel.appendChild(row);
+    });
+    var auditBody = addSection(container, 'SOC audit trail');
+    var auditRows = soar.audit || [];
+    if (!auditRows.length) {
+      addLines(auditBody, [line('No audit entries for this alert yet.')]);
+    }
+    auditRows.slice(0, 30).forEach(function (entry) {
+      auditBody.appendChild(buildAuditEntry(entry));
+    });
+  }
+
+  function refreshDetailSoar() {
+    if (currentAlertId === null) return;
+    var panel = document.getElementById('alert-detail');
+    var region = panel.querySelector('.soar-region');
+    if (!region) return;
+    var alertId = currentAlertId;
+    fetchJSON('/api/soc/alerts/' + encodeURIComponent(alertId) + '/soar')
+      .then(function (data) {
+        if (currentAlertId !== alertId) return;
+        // Carry over recent action messages so a live rebuild never erases
+        // the feedback the analyst just received.
+        var previousStatus = region.querySelector('.soar-status');
+        var preserved = previousStatus
+          ? Array.prototype.slice.call(previousStatus.childNodes).slice(-5)
+          : [];
+        buildSoarRegion(region, data.alert || {}, data.soar || {});
+        if (preserved.length) {
+          var newStatus = region.querySelector('.soar-status');
+          if (newStatus) {
+            preserved.forEach(function (node) { newStatus.appendChild(node); });
+          }
+        }
+      })
+      .catch(function () { /* transient polling error — keep last state */ });
+  }
+
+  function intelLine(alert) {
+    if (!alert.intel || !alert.intel.length) {
+      return line('Intel: no stored enrichment rows');
+    }
+    return line('Intel: ' + alert.intel.map(function (item) {
+      return item.key + '=' + item.value;
+    }).join(', '));
+  }
+
+  function fmtLik(value) {
+    return (value === null || value === undefined) ? '?' : String(value);
+  }
+
+  function runAiInvestigation(alertId, container) {
+    var status = line('Running AI investigation (uses the mock/offline provider by default) …');
+    container.appendChild(status);
+    fetchJSON('/api/alerts/' + alertId + '/ai-investigation', {
+      method: 'POST', headers: authHeaders(),
+    }).then(function (ai) {
+      status.remove();
+      if (!ai || ai.status !== 'ok') {
+        container.appendChild(line('AI status: ' + ((ai && ai.status) || 'unavailable')
+          + (ai && ai.reason ? ' (' + ai.reason + ')' : ''), 'meta soar-err'));
+        return;
+      }
+      container.appendChild(line('AI investigation refreshed — reload the alert detail to '
+        + 'see the persisted result in the AI ANALYST panel.'));
+      container.appendChild(line('Summary: ' + ((ai.response || {}).summary || '(none)')));
+    }).catch(function (error) {
+      status.remove();
+      container.appendChild(line('AI investigation failed: ' + error.message,
+        'meta soar-err'));
+    });
+  }
+
+  function executePlaybook(playbookId, alertId, container) {
+    var status = line('Requesting dry-run execution …');
+    container.appendChild(status);
+    fetchJSON('/api/playbooks/' + encodeURIComponent(playbookId) + '/execute', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ alert_id: alertId, dry_run: true, actor: 'analyst' }),
+    }).then(function (execution) {
+      status.remove();
+      container.appendChild(line('Execution ' + execution.execution_id + ' queued: '
+        + execution.state + (execution.dry_run ? ' (DRY RUN)' : ' (REAL)')));
+      // Drive the execution to its first stop (validation or the approval
+      // gate). advance() can never bypass a human approval.
+      return fetchJSON('/api/soar/executions/'
+        + encodeURIComponent(execution.execution_id) + '/advance', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ actor: 'analyst' }),
+      }).then(function (advanced) {
+        container.appendChild(line('Advanced to ' + advanced.state
+          + (advanced.state === 'WAITING_APPROVAL'
+            ? ' — human approval required below.' : '.'), 'ask-ans'));
+        refreshAll();
+        refreshDetailSoar();
+        return null;
+      });
+    }).catch(function (error) {
+      status.remove();
+      var duplicate = error.message.indexOf('duplicate_execution') !== -1
+        || error.message.indexOf('already exists') !== -1;
+      if (duplicate) {
+        var existing = (error.message.match(/EXE-[A-F0-9]+/) || [])[0];
+        container.appendChild(line('This playbook already ran for this alert '
+          + '(idempotency) — advancing the existing execution instead.', 'meta'));
+        if (existing) {
+          fetchJSON('/api/soar/executions/' + encodeURIComponent(existing)
+            + '/advance', {
+            method: 'POST', headers: authHeaders(),
+            body: JSON.stringify({ actor: 'analyst' }),
+          }).then(function (advanced) {
+            container.appendChild(line('Execution ' + existing + ' advanced to '
+              + advanced.state + (advanced.state === 'WAITING_APPROVAL'
+                ? ' — human approval required below.' : '.'), 'ask-ans'));
+            refreshAll();
+            refreshDetailSoar();
+            return null;
+          }).catch(function (advanceError) {
+            container.appendChild(line('Advance failed: ' + advanceError.message,
+              'meta soar-err'));
+          });
+        }
+        return;
+      }
+      container.appendChild(line('Execution failed: ' + error.message, 'meta soar-err'));
+    });
+  }
+
+  function decideApproval(approvalId, decision, row) {
+    fetchJSON('/api/soar/approvals/' + encodeURIComponent(approvalId) + '/' + decision, {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ approver: 'analyst' }),
+    }).then(function (execution) {
+      row.appendChild(line('Approval ' + decision + ': execution is now '
+        + execution.state, 'ask-ans'));
+      refreshAll();
+      refreshDetailSoar();
+    }).catch(function (error) {
+      row.appendChild(line('Approval failed: ' + error.message, 'meta soar-err'));
+    });
+  }
+
+  // ------------------------------------------------------------------
+  // Simulation lab
+  // ------------------------------------------------------------------
+
+  function loadScenarioCatalog() {
+    return fetchJSON('/api/simulation/scenarios').then(function (data) {
+      var select = document.getElementById('sim-scenario');
+      var rows = data.scenarios || [];
+      var options = rows.map(function (scenario) {
+        var option = document.createElement('option');
+        option.value = scenario.scenario_id;
+        option.textContent = scenario.name
+          + (scenario.classification === 'benign' ? ' (benign)' : '');
+        return option;
+      });
+      select.replaceChildren.apply(select, options);
+      if (rows.length) {
+        select.value = rows[0].scenario_id;
+        showScenarioDescription(rows[0]);
+      }
+      select.addEventListener('change', function () {
+        var match = rows.filter(function (scenario) {
+          return scenario.scenario_id === select.value;
+        })[0];
+        showScenarioDescription(match);
+      });
+    });
+  }
+
+  function showScenarioDescription(scenario) {
+    var body = document.getElementById('sim-desc');
+    if (!scenario) { body.textContent = ''; return; }
+    body.textContent = scenario.description
+      + ' — expected: '
+      + (scenario.expected.rule_id ? scenario.expected.rule_id + ' / ' : '')
+      + (scenario.expected.severity ? scenario.expected.severity : 'no alert')
+      + (scenario.expected.mitre && scenario.expected.mitre.length ?
+        ' / MITRE ' + scenario.expected.mitre.join(', ') : '')
+      + ' [' + scenario.classification + ']';
+  }
+
+  function runSimulation(step) {
+    var select = document.getElementById('sim-scenario');
+    var scenarioId = select.value;
+    var out = document.getElementById('sim-result');
+    var headers = authHeaders();
+    if (!headers.Authorization) {
+      out.replaceChildren(line('Enter the console token above to generate/process '
+        + 'scenarios (protected action).', 'meta soar-err'));
+      return;
+    }
+    out.replaceChildren(line(step === 'generate' ?
+      'Generating synthetic events …' : 'Processing events through the detection pipeline …'));
+    var promise;
+    if (step === 'generate') {
+      promise = fetchJSON('/api/simulation/scenarios/'
+        + encodeURIComponent(scenarioId) + '/generate', {
+        method: 'POST', headers: headers,
+      }).then(function (run) {
+        currentRunId = run.run_id;
+        document.getElementById('sim-process').disabled = false;
+        return run;
+      });
+    } else {
+      promise = fetchJSON('/api/simulation/scenarios/'
+        + encodeURIComponent(scenarioId) + '/process', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({ run_id: currentRunId }),
+      });
+    }
+    return promise.then(function (data) {
+      if (step === 'generate') {
+        out.replaceChildren(line('Run ' + data.run_id + ': '
+          + data.event_count + ' synthetic events generated (not yet processed). '
+          + 'Now press "Process events".'));
+        return null;
+      }
+      currentRunId = data.run.run_id;
+      renderProcessedRun(out, data.run, data.validation);
+      refreshAll();
+      return null;
+    }).catch(function (error) {
+      out.replaceChildren(line('Simulation failed: ' + error.message, 'meta soar-err'));
+      return null;
+    });
+  }
+
+  function renderProcessedRun(out, run, validation) {
+    var actual = (validation.actual || {});
+    var alerts = actual.alerts || [];
+    var rows = [
+      line('Events generated: ' + run.event_count),
+      line('Alerts generated: ' + alerts.length),
+      line('SCENARIO VALIDATION — ' + validation.scenario_id + ' : '
+        + validation.outcome.toUpperCase()),
+      line('Expected: '
+        + (validation.expected.detection ? (validation.expected.rule_id + ' / '
+          + validation.expected.severity) : 'no detection (benign)')
+        + (validation.expected.mitre && validation.expected.mitre.length ?
+          ' / MITRE ' + validation.expected.mitre.join(', ') : '')),
+    ];
+    alerts.forEach(function (alert, index) {
+      rows.push(line('Actual alert ' + (index + 1) + ': ' + alert.rule_id
+        + ' · severity ' + alert.severity + ' · risk '
+        + (alert.risk_score == null ? '—' : alert.risk_score)
+        + ' · Jev investigation: ' + String(alert.jev_investigation_required)
+        + ' · MITRE ' + ((alert.mitre || []).join(', ') || 'none')));
+    });
+    if (!alerts.length) {
+      rows.push(line('Actual: no alerts — scenario classified as benign and '
+        + 'correctly ignored by the deterministic rules.'));
+    }
+    rows.push(line('Checks: ' + (validation.checks || []).map(function (check) {
+      return (check.passed ? '✓ ' : '✗ ') + check.name;
+    }).join('   ')));
+    rows.push(line('(AI advisory status: '
+      + ((actual.ai && actual.ai.available) ? 'analyzed' : 'not analyzed (optional)')
+      + '; SOAR can be executed from the alert detail panel.)', 'meta'));
+    out.replaceChildren.apply(out, rows);
+  }
+
+  // ------------------------------------------------------------------
+  // Validation summary
+  // ------------------------------------------------------------------
+
+  function updateValidationSummary() {
+    return fetchJSON('/api/simulation/summary').then(function (summary) {
+      var totals = summary.totals || {};
+      document.getElementById('val-total').textContent = String(totals.runs || 0);
+      document.getElementById('val-passed').textContent = String(totals.passed || 0);
+      document.getElementById('val-warning').textContent = String(totals.warning || 0);
+      document.getElementById('val-failed').textContent = String(totals.failed || 0);
+      var body = document.getElementById('val-runs');
+      var rows = (summary.runs || []).slice(0, 12).map(function (runRow) {
+        var row = el('div', 'soar-item');
+        row.appendChild(el('span',
+          'chip ' + (runRow.outcome === 'passed' ? 'chip-ok' :
+            runRow.outcome === 'warning' ? 'chip-wait' : 'chip-bad'),
+          runRow.outcome));
+        row.appendChild(line(runRow.run_id + ' — ' + runRow.scenario_id
+          + ((runRow.failed_checks || []).length ?
+            ' (failed: ' + runRow.failed_checks.join(', ') + ')' : '')));
+        return row;
+      });
+      body.replaceChildren.apply(body, rows.length ? rows : [line('No validation runs yet.')]);
+    }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------------
+  // Threat hunt
+  // ------------------------------------------------------------------
+
+  function runHunt() {
+    var query = document.getElementById('hunt-query').value.trim();
+    var out = document.getElementById('hunt-results');
+    if (!query) { out.replaceChildren(line('Enter a hunt description.')); return; }
+    out.replaceChildren(line('Running hunt …'));
+    fetchJSON('/api/hunt/ai', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({ query: query }),
+    }).then(function (outcome) {
+      var aiFilters = ((outcome.query || {}).filters) || {};
+      if (!Object.keys(aiFilters).length) {
+        // The provider produced no usable filter (e.g. the offline mock
+        // provider) — fall back to the deterministic parser so the hunt
+        // still searches real telemetry meaningfully.
+        runDeterministicHunt(query, out,
+          'AI hunt returned no usable filters — deterministic query parser used.');
+        return;
+      }
+      renderHunt(outcome, out, query);
+    }).catch(function (error) {
+      // Degrade to the deterministic hunt endpoint on AI rejection.
+      out.replaceChildren(line('AI hunt unavailable (' + error.message.slice(0, 80)
+        + '); running deterministic hunt instead …', 'meta'));
+      runDeterministicHunt(query, out);
+    });
+  }
+
+  function runDeterministicHunt(query, out, note) {
+    var term = query.toLowerCase();
+    var filters = {};
+    var ipMatch = term.match(/\b\d{1,3}(\.\d{1,3}){3}\b/);
+    var events;
+    if (ipMatch) {
+      filters.src_ip = ipMatch[0];
+    } else if (term.indexOf('failed') !== -1 || term.indexOf('auth') !== -1) {
+      filters.event_type = 'auth_failed';
+    } else if (term.indexOf('dns') !== -1) {
+      filters.event_type = 'dns_query';
+    } else if (term.indexOf('process') !== -1) {
+      filters.event_type = 'process_start';
+    } else if (term.indexOf('scan') !== -1) {
+      filters.event_type = 'port_scan';
+    } else {
+      filters.event_type = 'auth_failed';
+    }
+    events = fetchJSON('/api/hunt?' + new URLSearchParams(filters).toString());
+    events.then(function (results) {
+      renderHunt({
+        status: 'ok', advisory_only: false, query: { filters: filters },
+        results: results,
+        summary: { status: 'unavailable', reason: 'ai_provider_disabled',
+          summary: null, observations: [], confidence: null },
+        note: note,
+      }, out, query);
+    }).catch(function (error) {
+      out.replaceChildren(line('Hunt failed: ' + error.message, 'meta soar-err'));
+    });
+  }
+
+  function renderHunt(outcome, out, queryText) {
+    var results = outcome.results || {};
+    var rows = (results.results || []).slice(0, 12);
+    var aiSummary = outcome.summary || {};
+    var body = [
+      line('Query: ' + (outcome.query && outcome.query.filters
+        ? JSON.stringify(outcome.query.filters) : queryText.slice(0, 120))),
+      line('Result count: ' + (results.total || 0)),
+    ];
+    if (outcome.note) body.push(line(outcome.note, 'meta'));
+    rows.forEach(function (eventRow) {
+      body.push(line('  ' + eventRow.event_time + ' ' + eventRow.event_type
+        + (eventRow.src_ip ? ' src ' + eventRow.src_ip : '')
+        + (eventRow.user ? ' user ' + eventRow.user : '')
+        + (eventRow.host ? ' host ' + eventRow.host : '')
+        + (eventRow.command_line ? ' cmd ' + eventRow.command_line.slice(0, 80) : '')));
+    });
+    body.push(line('AI summary: '
+      + (aiSummary.status === 'ok'
+        ? (aiSummary.summary || '(none)')
+        : ('unavailable (' + (aiSummary.reason || 'unknown') + ') — raw results '
+          + 'shown above; AI is advisory and optional.'))));
+    (aiSummary.observations || []).slice(0, 5).forEach(function (observation, i) {
+      body.push(line('  observation ' + (i + 1) + ': ' + observation));
+    });
+    out.replaceChildren.apply(out, body);
+  }
+
+  // ------------------------------------------------------------------
+  // SOAR panel + audit
+  // ------------------------------------------------------------------
+
+  function soarFillList(id, children) {
     var container = document.getElementById(id);
     if (!container) return;
-    var children = rows.map(build);
-    if (!children.length) {
-      children = [soarLine('No records.', 'meta')];
-    }
-    container.replaceChildren.apply(container, children);
+    container.replaceChildren.apply(container,
+      children.length ? children : [line('No records.')]);
   }
 
   function buildPlaybookRow(playbook) {
-    var wrap = document.createElement('div');
-    wrap.className = 'soar-item';
-    var title = document.createElement('div');
-    title.appendChild(soarStateChip(playbook.enabled ? 'ENABLED' : 'DISABLED'));
-    title.appendChild(soarLine(
-      playbook.playbook_id + ' v' + playbook.version + ' — ' + playbook.name +
-      ' (approval: ' + playbook.definition.approval_policy + ')'));
+    var wrap = el('div', 'soar-item');
+    var title = el('div');
+    title.appendChild(stateChip(playbook.enabled ? 'ENABLED' : 'DISABLED'));
+    title.appendChild(line(playbook.playbook_id + ' v' + playbook.version
+      + ' — ' + playbook.name + ' (approval: '
+      + (playbook.definition || {}).approval_policy + ')'));
     wrap.appendChild(title);
     return wrap;
   }
 
   function buildExecutionRow(execution) {
-    var wrap = document.createElement('div');
-    wrap.className = 'soar-item';
-    var head = document.createElement('div');
-    head.appendChild(soarStateChip(execution.state));
-    head.appendChild(soarLine(
-      execution.execution_id + ' — ' + execution.playbook_id +
-      ' v' + execution.playbook_version + ' · alert #' + execution.alert_id));
-    head.appendChild(soarLine(execution.dry_run ? 'DRY RUN' : 'REAL EXECUTION',
+    var wrap = el('div', 'soar-item');
+    var head = el('div');
+    head.appendChild(stateChip(execution.state));
+    head.appendChild(line(execution.execution_id + ' — ' + execution.playbook_id
+      + ' v' + execution.playbook_version + ' · alert #'
+      + (execution.alert_id == null ? '—' : execution.alert_id)));
+    head.appendChild(line(execution.dry_run ? 'DRY RUN' : 'REAL EXECUTION',
       execution.dry_run ? 'meta soar-dry' : 'meta soar-real'));
-    if (execution.error) {
-      head.appendChild(soarLine(execution.error, 'meta soar-err'));
-    }
+    if (execution.error) head.appendChild(line(execution.error, 'meta soar-err'));
     wrap.appendChild(head);
+    (execution.actions || []).forEach(function (action) {
+      wrap.appendChild(line('  action[' + action.action_index + '] ' + action.action_type
+        + ': ' + action.state, 'meta soar-action'));
+    });
     return wrap;
   }
 
   function buildApprovalRow(approval) {
-    var wrap = document.createElement('div');
-    wrap.className = 'soar-item';
-    wrap.appendChild(soarStateChip(approval.decision));
-    wrap.appendChild(soarLine(
-      approval.approval_id + ' — ' + approval.action_type +
-      ' (role: ' + approval.required_role + ', requested ' +
-      approval.requested_at + ')'));
+    var wrap = el('div', 'soar-item');
+    wrap.appendChild(stateChip(approval.decision));
+    wrap.appendChild(line(approval.approval_id + ' — ' + approval.action_type
+      + ' (role: ' + approval.required_role + ')'));
+    if (approval.decision === 'pending') {
+      var approve = el('button', 'soar-btn', 'Approve');
+      var reject = el('button', 'soar-btn soar-btn-bad', 'Reject');
+      approve.type = 'button';
+      reject.type = 'button';
+      approve.addEventListener('click', function () {
+        decideApproval(approval.approval_id, 'approve', wrap);
+      });
+      reject.addEventListener('click', function () {
+        decideApproval(approval.approval_id, 'reject', wrap);
+      });
+      wrap.appendChild(approve);
+      wrap.appendChild(reject);
+    }
     return wrap;
   }
 
   function buildIncidentRow(incident) {
-    var wrap = document.createElement('div');
-    wrap.className = 'soar-item';
-    wrap.appendChild(soarStateChip(incident.status));
-    wrap.appendChild(soarLine(
-      incident.incident_id + ' — ' + incident.title + ' [' +
-      incident.severity + '] alerts: ' + (incident.alert_ids || []).join(', ')));
+    var wrap = el('div', 'soar-item');
+    wrap.appendChild(stateChip(incident.status));
+    wrap.appendChild(line(incident.incident_id + ' — ' + incident.title + ' ['
+      + incident.severity + '] alerts: ' + (incident.alert_ids || []).join(', ')));
     return wrap;
   }
 
-  function buildAuditRow(entry) {
-    var wrap = document.createElement('div');
-    wrap.className = 'soar-item';
-    wrap.appendChild(soarLine(
-      entry.created_at + ' — ' + entry.actor + ' — ' + entry.event_type +
-      (entry.from_state ? ' · ' + entry.from_state + ' → ' + entry.to_state : '') +
-      (entry.dry_run ? ' · DRY RUN' : ' · REAL'), 'meta'));
+  function buildAuditEntry(entry) {
+    var wrap = el('div', 'soar-item');
+    wrap.appendChild(line(entry.created_at + ' — ' + entry.actor + ' — '
+      + entry.event_type
+      + (entry.from_state ? ' · ' + entry.from_state + ' → ' + entry.to_state : '')
+      + (entry.dry_run ? ' · DRY RUN' : ' · REAL'), 'meta'));
     if (entry.failure_reason) {
-      wrap.appendChild(soarLine(entry.failure_reason, 'meta soar-err'));
+      wrap.appendChild(line(entry.failure_reason, 'meta soar-err'));
     }
     return wrap;
   }
 
   function fetchSoar() {
     var playbooks = fetchJSON('/api/playbooks').then(function (data) {
-      soarFillList('soar-playbooks', data.playbooks || [], buildPlaybookRow);
+      soarFillList('soar-playbooks', (data.playbooks || []).map(buildPlaybookRow));
     });
     var executions = fetchJSON('/api/soar/executions?limit=10').then(function (data) {
-      soarFillList('soar-executions', data.executions || [], buildExecutionRow);
+      soarFillList('soar-executions', (data.executions || []).map(buildExecutionRow));
     });
     var approvals = fetchJSON('/api/soar/approvals?decision=pending&limit=10')
       .then(function (data) {
-        soarFillList('soar-approvals', data.approvals || [], buildApprovalRow);
+        soarFillList('soar-approvals', (data.approvals || []).map(buildApprovalRow));
       });
     var incidents = fetchJSON('/api/incidents?limit=10').then(function (data) {
-      soarFillList('soar-incidents', data.incidents || [], buildIncidentRow);
+      soarFillList('soar-incidents', (data.incidents || []).map(buildIncidentRow));
     });
-    var audit = fetchJSON('/api/soar/executions').then(function (data) {
-      var ids = (data.executions || []).slice(0, 10)
-        .map(function (execution) { return execution.execution_id; });
-      return Promise.all(ids.map(function (id) {
-        return fetchJSON('/api/soar/executions/' + encodeURIComponent(id) +
-          '/audit');
-      })).then(function (batches) {
-        var rows = [].concat.apply([], batches.map(function (batch) {
-          return batch.audit || [];
-        }));
-        soarFillList('soar-audit', rows, buildAuditRow);
+    var audit = fetchSoarAudit();
+    var auditFilter = function () { fetchSoarAudit(); };
+    var alertFilterEl = document.getElementById('audit-filter-alert');
+    if (alertFilterEl && !alertFilterEl.dataset.bound) {
+      alertFilterEl.dataset.bound = '1';
+      alertFilterEl.addEventListener('change', auditFilter);
+      document.getElementById('audit-filter-actor').addEventListener('change', auditFilter);
+    }
+    return Promise.allSettled([playbooks, executions, approvals, incidents, audit])
+      .then(function (results) {
+        var failed = results.some(function (r) { return r.status === 'rejected'; });
+        if (failed) {
+          ['soar-playbooks', 'soar-executions', 'soar-approvals']
+            .forEach(function (id) {
+              var node = document.getElementById(id);
+              if (node && !node.hasChildNodes()) {
+                node.replaceChildren(line('SOAR data unavailable.', 'meta'));
+              }
+            });
+        }
       });
-    });
-    return Promise.all([
-      playbooks, executions, approvals, incidents,
-      audit.catch(function () { soarFillList('soar-audit', [], buildAuditRow); })
-    ]).catch(function () {
-      ['soar-playbooks', 'soar-executions', 'soar-approvals',
-        'soar-incidents'].forEach(function (id) {
-        soarFillList(id, [], function () {
-          return soarLine('SOAR data unavailable.', 'meta');
+  }
+
+  function fetchSoarAudit() {
+    var params = new URLSearchParams();
+    var alertFilter = document.getElementById('audit-filter-alert');
+    var actorFilter = document.getElementById('audit-filter-actor');
+    var alertValue = alertFilter && alertFilter.value.trim();
+    var actorValue = actorFilter && actorFilter.value.trim();
+    var path;
+    if (alertValue && /^\d+$/.test(alertValue)) {
+      path = '/api/soc/alerts/' + alertValue + '/full';
+      return fetchJSON(path).then(function (full) {
+        soarFillList('soc-audit', (full.soar.audit || []).slice(0, 30)
+          .map(buildAuditEntry));
+      });
+    }
+    if (actorValue) {
+      params.set('actor', actorValue);
+    }
+    return Promise.allSettled(
+      [fetchJSON('/api/soar/executions?limit=10').then(function (data) {
+        var ids = (data.executions || []).map(function (e) { return e.execution_id; });
+        return Promise.allSettled(ids.map(function (id) {
+          return fetchJSON('/api/soar/executions/'
+            + encodeURIComponent(id) + '/audit');
+        })).then(function (batches) {
+          var rows = [];
+          batches.forEach(function (batch) {
+            if (batch.status !== 'fulfilled') return;
+            var actorMatch = !actorValue ||
+              (batch.value.audit || []).some(function (entry) {
+                return (entry.actor || '').indexOf(actorValue) !== -1;
+              });
+            if (actorMatch) rows.push.apply(rows, batch.value.audit || []);
+          });
+          soarFillList('soc-audit', rows.slice(0, 40).map(buildAuditEntry));
         });
+      })]
+    ).then(function () {});
+  }
+
+  // ------------------------------------------------------------------
+  // SOC command bar, workers, live event stream (all data-derived)
+  // ------------------------------------------------------------------
+
+  var WORKER_DEFS = [
+    ['ingest', 'INGEST WORKER'],
+    ['detection', 'DETECTION WORKER'],
+    ['correlation', 'CORRELATION WORKER'],
+    ['intel', 'THREAT INTEL WORKER'],
+    ['risk', 'RISK WORKER'],
+    ['jev', 'JEV DECISION WORKER'],
+    ['ai', 'AI ANALYST'],
+    ['rag', 'RAG RETRIEVAL'],
+    ['incident', 'INCIDENT WORKER'],
+    ['soar', 'SOAR WORKER'],
+  ];
+  var workerStates = {};
+  WORKER_DEFS.forEach(function (def) { workerStates[def[0]] = 'ONLINE'; });
+
+  function setWorker(name, state) {
+    if (name in workerStates) {
+      workerStates[name] = state;
+      renderWorkers();
+    }
+  }
+
+  function setWorkers(state) {
+    WORKER_DEFS.forEach(function (def) { workerStates[def[0]] = state; });
+    renderWorkers();
+  }
+
+  function renderWorkers() {
+    var host = document.getElementById('soc-workers');
+    if (!host) return;
+    var rows = WORKER_DEFS.map(function (def) {
+      var state = workerStates[def[0]] || 'ONLINE';
+      var wrap = el('div', 'worker worker-' + state.toLowerCase().replace('_', '-'));
+      var dot = el('span', 'worker-dot');
+      wrap.appendChild(dot);
+      wrap.appendChild(el('span', 'worker-name', def[1]));
+      wrap.appendChild(el('span', 'worker-state', '● ' + state));
+      return wrap;
+    });
+    host.replaceChildren.apply(host, rows);
+  }
+
+  function setPill(id, text, cls) {
+    var node = document.getElementById(id);
+    if (!node) return;
+    node.textContent = text;
+    node.className = 'pill' + (cls ? ' ' + cls : '');
+  }
+
+  var lastStreamCount = 0;
+  var lastStreamPoll = 0;
+  var firedEventIds = {};
+
+  function refreshEventStream() {
+    return fetchJSON('/api/events/recent?limit=40').then(function (data) {
+      var events = data.events || [];
+      var host = document.getElementById('event-stream');
+      if (!host) return;
+      var rows = events.map(function (event) {
+        var row = el('div', 'stream-row');
+        if (firedEventIds[event.event_id]) row.className += ' stream-fired';
+        if (event.source === 'soc-simulation') {
+          row.appendChild(el('span', 'chip chip-sim', 'LIVE SYNTHETIC'));
+        }
+        row.appendChild(el('span', 'stream-time',
+          (event.ingestion_time || '').replace('T', ' ').slice(0, 19)));
+        row.appendChild(el('span', 'stream-type', event.event_type || '?'));
+        row.appendChild(el('span', 'stream-entity',
+          (event.src_ip || '—') + (event.dst_ip ? ' → ' + event.dst_ip
+            + (event.dst_port ? ':' + event.dst_port : '') : '')));
+        row.appendChild(el('span', 'stream-entity',
+          (event.host || '—') + (event.user_name ? ' / ' + event.user_name : '')));
+        row.appendChild(el('span', 'stream-result',
+          (event.action || '') + (event.outcome ? ' ' + event.outcome : '')));
+        return row;
+      });
+      host.replaceChildren.apply(host, rows.length ? rows :
+        [line('No events yet — run a scenario in the Simulation Lab.', 'meta')]);
+      // events/sec derived from actual poll deltas (real data, no fake rate).
+      var now = Date.now();
+      if (lastStreamPoll) {
+        var delta = Math.max(0, events.length - lastStreamCount);
+        var seconds = Math.max(0.5, (now - lastStreamPoll) / 1000);
+        var epsNode = document.getElementById('tb-eps');
+        if (epsNode) epsNode.textContent = String(Math.round(delta / seconds));
+      }
+      lastStreamCount = events.length;
+      lastStreamPoll = now;
+      var newest = events.length ? events[0].ingestion_time : null;
+      var lastNode = document.getElementById('tb-last-event');
+      if (lastNode && newest) {
+        lastNode.textContent = 'last event: ' + newest.replace('T', ' ').slice(0, 19);
+      }
+    }).catch(function () {});
+  }
+
+  // ------------------------------------------------------------------
+  // Distribution bars (severity / MITRE / top sources) — pure DOM
+  // ------------------------------------------------------------------
+
+  function buildBars(containerId, entries) {
+    var host = document.getElementById(containerId);
+    if (!host) return;
+    var rows = entries.map(function (entry) {
+      var wrap = el('div', 'bar-row');
+      wrap.appendChild(el('span', 'bar-label', entry.label));
+      var track = el('span', 'bar-track');
+      var fill = el('span', 'bar-fill ' + (entry.cls || ''));
+      fill.style.width = Math.max(4, entry.pct) + '%';
+      track.appendChild(fill);
+      wrap.appendChild(track);
+      wrap.appendChild(el('span', 'bar-value', String(entry.value)));
+      return wrap;
+    });
+    host.replaceChildren.apply(host, rows.length ? rows :
+      [line('No data yet.', 'meta')]);
+  }
+
+  function renderSeverityBars(overview) {
+    var entries = [
+      { label: 'CRITICAL', value: overview.critical_alerts || 0, cls: 'bar-crit' },
+      { label: 'HIGH', value: overview.high_alerts || 0, cls: 'bar-high' },
+      { label: 'MEDIUM', value: overview.medium_alerts || 0, cls: 'bar-med' },
+      { label: 'LOW', value: overview.low_alerts || 0, cls: 'bar-low' },
+    ];
+    var max = Math.max.apply(null, entries.map(function (e) { return e.value; }).concat([1]));
+    entries.forEach(function (entry) { entry.pct = entry.value * 100 / max; });
+    buildBars('bar-severity', entries);
+  }
+
+  function renderMitreBars(alerts) {
+    var counts = {};
+    (alerts || []).forEach(function (alert) {
+      // Queue rows carry flattened 'mitre_techniques'; run views use 'mitre'.
+      var techniques = alert.mitre_techniques || alert.mitre || [];
+      techniques.forEach(function (technique) {
+        counts[technique] = (counts[technique] || 0) + 1;
       });
     });
+    var entries = Object.keys(counts).sort(function (a, b) {
+      return counts[b] - counts[a];
+    }).slice(0, 6).map(function (technique) {
+      return { label: technique, value: counts[technique], cls: 'bar-mitre' };
+    });
+    var max = Math.max.apply(null, entries.map(function (e) { return e.value; }).concat([1]));
+    entries.forEach(function (entry) { entry.pct = entry.value * 100 / max; });
+    buildBars('bar-mitre', entries);
+  }
+
+  function renderSourceBars(alerts) {
+    var counts = {};
+    (alerts || []).forEach(function (alert) {
+      (alert.source_ips || []).forEach(function (ip) {
+        counts[ip] = (counts[ip] || 0) + 1;
+      });
+    });
+    var entries = Object.keys(counts).sort(function (a, b) {
+      return counts[b] - counts[a];
+    }).slice(0, 6).map(function (ip) {
+      return { label: ip, value: counts[ip], cls: 'bar-src' };
+    });
+    var max = Math.max.apply(null, entries.map(function (e) { return e.value; }).concat([1]));
+    entries.forEach(function (entry) { entry.pct = entry.value * 100 / max; });
+    buildBars('bar-sources', entries);
+  }
+
+  // ------------------------------------------------------------------
+  // Simulation pipeline runner (stages map to real backend calls)
+  // ------------------------------------------------------------------
+
+  var PIPELINE_STAGES = [
+    'Generating synthetic events',
+    'Ingesting',
+    'Normalizing',
+    'Running detections',
+    'Correlating',
+    'Threat intelligence',
+    'Risk scoring',
+    'Jev decision',
+    'AI investigation',
+    'Incident evaluation',
+    'SOAR evaluation',
+    'Complete',
+  ];
+
+  function renderPipelineProgress(stageIndex) {
+    var host = document.getElementById('sim-progress');
+    if (!host) return;
+    var rows = PIPELINE_STAGES.map(function (name, index) {
+      var cls = 'pipe-step';
+      if (index < stageIndex) cls += ' pipe-done';
+      if (index === stageIndex) cls += ' pipe-active';
+      var mark = index < stageIndex ? '✓' : (index === stageIndex ? '▸' : '·');
+      return el('div', cls, '[' + (index + 1) + '] ' + mark + ' ' + name);
+    });
+    host.replaceChildren.apply(host, rows);
+  }
+
+  function requireToken(out) {
+    var headers = authHeaders();
+    if (!headers.Authorization) {
+      out.replaceChildren(line('Enter the console token above first (protected '
+        + 'action).', 'meta soar-err'));
+      return null;
+    }
+    return headers;
+  }
+
+  function runFullPipeline() {
+    var out = document.getElementById('sim-result');
+    var headers = requireToken(out);
+    if (!headers) return;
+    var scenarioId = document.getElementById('sim-scenario').value;
+    setPill('pill-sim', 'SIM: RUNNING', 'pill-run');
+    setWorkers('PROCESSING');
+    var stage = 0;
+    renderPipelineProgress(stage);
+    out.replaceChildren(line('Running ' + scenarioId + ' through the real pipeline …'));
+    var progressTimer = setInterval(function () {
+      stage = Math.min(stage + 1, PIPELINE_STAGES.length - 2);
+      renderPipelineProgress(stage);
+      if (stage === 3) {
+        setWorker('detection', 'PROCESSING');
+        setPill('pill-detection', 'DETECTION: SCANNING', 'pill-run');
+      }
+      if (stage === 5) setWorker('intel', 'PROCESSING');
+      if (stage === 7) setWorker('jev', 'PROCESSING');
+    }, 180);
+    var pipeline = document.getElementById('sim-pipeline');
+    if (pipeline) pipeline.replaceChildren();
+    var attackPath = document.getElementById('attack-path');
+    if (attackPath) attackPath.replaceChildren();
+    fetchJSON('/api/simulation/scenarios/' + encodeURIComponent(scenarioId) + '/generate', {
+      method: 'POST', headers: headers,
+    }).then(function (run) {
+      currentRunId = run.run_id;
+      document.getElementById('sim-process').disabled = false;
+      return fetchJSON('/api/simulation/scenarios/' + encodeURIComponent(scenarioId)
+        + '/process', {
+        method: 'POST', headers: headers,
+        body: JSON.stringify({ run_id: run.run_id }),
+      });
+    }).then(function (data) {
+      clearInterval(progressTimer);
+      renderPipelineProgress(PIPELINE_STAGES.length - 1);
+      currentRunId = data.run.run_id;
+      renderProcessedRun(out, data.run, data.validation);
+      setPill('pill-sim', 'SIM: READY', 'pill-ok');
+      setPill('pill-detection', 'DETECTION: ONLINE', 'pill-ok');
+      setWorkers('ONLINE');
+      return renderRunPipeline(data.run.run_id);
+    }).catch(function (error) {
+      clearInterval(progressTimer);
+      setPill('pill-sim', 'SIM: READY', 'pill-ok');
+      setWorkers('ONLINE');
+      out.replaceChildren(line('Simulation failed: ' + error.message, 'meta soar-err'));
+    });
+  }
+
+  function renderRunPipeline(runId) {
+    return fetchJSON('/api/simulation/runs/' + encodeURIComponent(runId) + '/events')
+      .then(function (data) {
+        firedEventIds = {};
+        (data.alerts || []).forEach(function (alert) {
+          var ids = alert.source_event_ids || [];
+          ids.forEach(function (id) { firedEventIds[id] = true; });
+        });
+        var host = document.getElementById('sim-pipeline');
+        if (host) {
+          var rows = [el('div', 'pipe-title', 'RUN ' + data.run_id + ' — '
+            + data.scenario_id + ' (' + data.status + ')')];
+          (data.events || []).forEach(function (event) {
+            var row = el('div', 'pipe-event'
+              + (firedEventIds[event.event_id] ? ' pipe-event-fired' : ''));
+            row.appendChild(el('span', 'stream-time',
+              (event.event_time || '').slice(11, 19)));
+            row.appendChild(el('span', 'stream-type', event.event_type || '?'));
+            row.appendChild(el('span', 'stream-entity',
+              (event.src_ip || '—') + (event.user_name ? ' / ' + event.user_name : '')));
+            row.appendChild(el('span', 'stream-result', firedEventIds[event.event_id]
+              ? '→ contributed to alert' : 'processed'));
+            rows.push(row);
+          });
+          (data.alerts || []).forEach(function (alert) {
+            var row = el('div', 'pipe-alert');
+            row.appendChild(el('span', 'chip ' + (severityClasses[alert.severity]
+              || 'unknown'), alert.severity || '?'));
+            row.appendChild(line('DETECTION FIRED → ALERT #' + alert.id + ' · '
+              + alert.rule_id + ' · risk ' + (alert.deterministic_risk_score == null
+                ? '—' : alert.deterministic_risk_score) + '/100 · Jev '
+              + (alert.jev_priority || '—') + ' · MITRE '
+              + ((alert.mitre || []).join(', ') || '—')));
+            rows.push(row);
+          });
+          if (!(data.alerts || []).length) {
+            rows.push(el('div', 'pipe-event',
+              'No detection fired — events processed and stored only.'));
+          }
+          host.replaceChildren.apply(host, rows);
+        }
+        setWorker('detection', (data.alerts || []).length ? 'PROCESSING' : 'ONLINE');
+        setPill('pill-detection', (data.alerts || []).length
+          ? 'DETECTION: FIRED' : 'DETECTION: ONLINE',
+          (data.alerts || []).length ? 'pill-run' : 'pill-ok');
+        if ((data.alerts || []).length) {
+          renderAttackPath(data);
+        } else if (document.getElementById('attack-path')) {
+          document.getElementById('attack-path').replaceChildren();
+        }
+        refreshEventStream();
+        return null;
+      }).catch(function () {});
+  }
+
+  function attackPathRow(text, cls) {
+    var wrap = el('div', 'ap-step' + (cls ? ' ' + cls : ''));
+    wrap.appendChild(el('span', 'ap-node', text));
+    return wrap;
+  }
+
+  function attackPathArrow(label) {
+    var wrap = el('div', 'ap-arrow');
+    wrap.appendChild(el('span', 'ap-arrow-line', '|'));
+    wrap.appendChild(el('span', 'ap-arrow-label', label));
+    wrap.appendChild(el('span', 'ap-arrow-line', '↓'));
+    return wrap;
+  }
+
+  function renderAttackPath(runData) {
+    var host = document.getElementById('attack-path');
+    if (!host) return;
+    var alert = (runData.alerts || [])[0];
+    var firstEvent = (runData.events || [])[0] || {};
+    var rows = [el('div', 'pipe-title', 'ATTACK PATH — derived from stored evidence')];
+    rows.push(attackPathRow('ATTACKER ' + (firstEvent.src_ip || '—')));
+    rows.push(attackPathArrow((runData.events || []).length + ' synthetic events'));
+    rows.push(attackPathRow((firstEvent.dst_ip || firstEvent.host || 'TARGET')));
+    rows.push(attackPathArrow('detection'));
+    rows.push(attackPathRow('DETECTION ' + (alert ? alert.rule_id : '—')
+      + (alert ? ' · ' + alert.severity + ' · risk ' + alert.deterministic_risk_score
+        + '/100' : ''), 'ap-hot'));
+    rows.push(attackPathArrow('Jev (deterministic, not AI)'));
+    rows.push(attackPathRow('JEV: ' + (alert ? ((alert.jev_priority || '—')
+      + (alert.jev_investigation_required ? ' · INVESTIGATE' : '')) : '—'), 'ap-hot'));
+    rows.push(attackPathArrow('MITRE ATT&CK'));
+    rows.push(attackPathRow('ATT&CK: ' + ((alert && alert.mitre || []).join(', ') || '—')));
+    rows.push(attackPathArrow('AI analyst (advisory)'));
+    rows.push(attackPathRow('AI: ' + ((alert && alert.mitre) ? 'analysis available in alert detail' : 'not run — deterministic engine unaffected'), 'ap-ai'));
+    rows.push(attackPathArrow('response'));
+    rows.push(attackPathRow('INCIDENT + SOAR DRY-RUN + HUMAN APPROVAL', 'ap-hot'));
+    rows.push(line('Open the alert in the queue to run AI, create the incident, and '
+      + 'execute the SOAR playbook (approval-gated, dry-run).', 'meta'));
+    host.replaceChildren.apply(host, rows);
+  }
+
+  // ------------------------------------------------------------------
+  // Demonstration mode (real pipeline; approval stays human)
+  // ------------------------------------------------------------------
+
+  function renderDemoStep(container, step) {
+    var row = el('div', 'demo-step');
+    row.appendChild(el('span', 'chip chip-run', String(step.step)));
+    row.appendChild(el('span', 'demo-step-name', step.name));
+    row.appendChild(el('span', 'demo-step-detail', step.detail));
+    container.appendChild(row);
+  }
+
+  function runDemo() {
+    var out = document.getElementById('demo-steps');
+    var headers = requireToken(out);
+    if (!headers) return;
+    out.replaceChildren(line('Running the guided SOC demo on the real pipeline …'));
+    setPill('pill-sim', 'SIM: DEMO', 'pill-run');
+    setWorkers('PROCESSING');
+    fetchJSON('/api/simulation/demo', { method: 'POST', headers: headers })
+      .then(function (demo) {
+        setPill('pill-sim', 'SIM: READY', 'pill-ok');
+        setWorkers('ONLINE');
+        out.replaceChildren();
+        (demo.steps || []).forEach(function (step, index) {
+          setTimeout(function () { renderDemoStep(out, step); }, index * 280);
+        });
+        setTimeout(function () {
+          if (demo.approval_id) {
+            var row = el('div', 'demo-step');
+            row.appendChild(el('span', 'chip chip-wait', 'GATE'));
+            row.appendChild(el('span', 'demo-step-name', 'human approval required'));
+            var approve = el('button', 'soar-btn', 'Approve & complete dry-run');
+            approve.type = 'button';
+            approve.addEventListener('click', function () {
+              decideApproval(demo.approval_id, 'approve', row);
+              fetchJSON('/api/soar/executions/' + encodeURIComponent(demo.execution_id)
+                + '/advance', { method: 'POST', headers: headers,
+                  body: JSON.stringify({ actor: 'analyst' }) })
+                .then(function (execution) {
+                  row.appendChild(line('Execution is now ' + execution.state
+                    + ' (dry-run, simulated only).', 'ask-ans'));
+                  refreshAll();
+                  return null;
+                }).catch(function (error) {
+                  row.appendChild(line('Advance failed: ' + error.message,
+                    'meta soar-err'));
+                  return null;
+                });
+            });
+            row.appendChild(approve);
+            out.appendChild(row);
+          }
+          refreshAll();
+        }, (demo.steps || []).length * 280 + 120);
+      })
+      .catch(function (error) {
+        setPill('pill-sim', 'SIM: READY', 'pill-ok');
+        setWorkers('ONLINE');
+        out.replaceChildren(line('Demo failed: ' + error.message, 'meta soar-err'));
+      });
+  }
+
+  function resetDemo() {
+    var out = document.getElementById('demo-steps');
+    var headers = requireToken(out);
+    if (!headers) return;
+    fetchJSON('/api/simulation/reset', { method: 'POST', headers: headers })
+      .then(function (result) {
+        out.replaceChildren(line('Simulation-lab data cleared: '
+          + JSON.stringify(result) + ' — alerts, events, incidents, investigations,'
+          + ' approvals, SOAR executions and validation runs from the lab are gone.'
+          + ' Configuration, rules and knowledge base untouched.', 'ask-ans'));
+        refreshAll();
+        refreshEventStream();
+        return null;
+      })
+      .catch(function (error) {
+        out.replaceChildren(line('Reset failed: ' + error.message, 'meta soar-err'));
+      });
+  }
+
+  // ------------------------------------------------------------------
+  // Full SOC validation runner
+  // ------------------------------------------------------------------
+
+  function runFullValidation() {
+    var progress = document.getElementById('val-progress');
+    var headers = requireToken(progress);
+    if (!headers) return;
+    progress.replaceChildren(line('Executing all 15 scenarios through the real '
+      + 'pipeline (generate → process → validate) …'));
+    var button = document.getElementById('val-run-all');
+    if (button) button.disabled = true;
+    setPill('pill-sim', 'SIM: VALIDATING', 'pill-run');
+    fetchJSON('/api/simulation/validate-all', { method: 'POST', headers: headers })
+      .then(function (report) {
+        if (button) button.disabled = false;
+        setPill('pill-sim', 'SIM: READY', 'pill-ok');
+        progress.replaceChildren(line('Validation complete at '
+          + (report.generated_at || '').replace('T', ' ').slice(0, 19)
+          + ' — every scenario ran against the real engine.'));
+        renderValidationReport(report);
+        updateValidationSummary();
+        return null;
+      })
+      .catch(function (error) {
+        if (button) button.disabled = false;
+        setPill('pill-sim', 'SIM: READY', 'pill-ok');
+        progress.replaceChildren(line('Validation failed: ' + error.message,
+          'meta soar-err'));
+      });
+  }
+
+  function renderValidationReport(report) {
+    var totals = report.totals || {};
+    document.getElementById('val-total').textContent = String(totals.scenarios || 0);
+    document.getElementById('val-passed').textContent = String(totals.passed || 0);
+    document.getElementById('val-warning').textContent = String(totals.warning || 0);
+    document.getElementById('val-failed').textContent = String(totals.failed || 0);
+    var body = document.getElementById('val-table-body');
+    if (!body) return;
+    var rows = (report.results || []).map(function (result) {
+      var tr = el('tr', 'val-row');
+      var expected = result.expected.detection
+        ? (result.expected.rule_id + ' / ' + result.expected.severity)
+        : 'no alert';
+      var alerts = (result.actual.alerts || []);
+      var actual = alerts.length
+        ? alerts.map(function (a) { return a.rule_id; }).join(' + ')
+        : 'no alert';
+      var first = alerts[0] || {};
+      var ai = result.actual.ai || {};
+      var aiText = ai.available ? ('analyzed ×' + ai.available) : 'not analyzed';
+      var checks = (result.failed_checks || []).length
+        ? 'failed: ' + result.failed_checks.join(', ') : 'all green';
+      var outcome = result.outcome.toUpperCase();
+      if (result.false_positive) outcome += ' (designed FP)';
+      tr.appendChild(el('td', 'queue-strong', result.name));
+      tr.appendChild(queueCell(expected));
+      tr.appendChild(queueCell(actual));
+      tr.appendChild(queueCell(first.severity));
+      tr.appendChild(queueCell(first.risk_score == null ? null
+        : first.risk_score + '/100'));
+      tr.appendChild(queueCell(first.jev_priority));
+      tr.appendChild(queueCell(((first.mitre || []).join(', ')) || null));
+      tr.appendChild(queueCell(aiText));
+      tr.appendChild(queueCell(checks));
+      var outcomeCell = queueCell(null);
+      outcomeCell.appendChild(stateChip(result.outcome === 'passed' ? 'ok'
+        : result.outcome === 'warning' ? 'PENDING' : 'ACTION_FAILED'));
+      outcomeCell.appendChild(line(outcome));
+      tr.appendChild(outcomeCell);
+      return tr;
+    });
+    body.replaceChildren.apply(body, rows);
+  }
+
+  // ------------------------------------------------------------------
+  // Refresh loop
+  // ------------------------------------------------------------------
+
+  function refreshAll() {
+    updateOverview().catch(function () {});
+    fetchAlerts();
+    updateValidationSummary();
+    fetchSoar();
   }
 
   filterSel.addEventListener('change', fetchAlerts);
   document.getElementById('refreshBtn').addEventListener('click', fetchAlerts);
-  setInterval(fetchAlerts, 1500);
+  document.getElementById('sim-generate').addEventListener('click', function () {
+    runSimulation('generate');
+  });
+  document.getElementById('sim-process').addEventListener('click', function () {
+    runSimulation('process');
+  });
+  var pipelineBtn = document.getElementById('sim-run-pipeline');
+  if (pipelineBtn) pipelineBtn.addEventListener('click', runFullPipeline);
+  var demoBtn = document.getElementById('demo-start');
+  if (demoBtn) demoBtn.addEventListener('click', runDemo);
+  var resetBtn = document.getElementById('demo-reset');
+  if (resetBtn) resetBtn.addEventListener('click', resetDemo);
+  var valBtn = document.getElementById('val-run-all');
+  if (valBtn) valBtn.addEventListener('click', runFullValidation);
+  document.getElementById('hunt-run').addEventListener('click', runHunt);
   fetchAlerts();
   fetchSoar();
-  setInterval(fetchSoar, 5000);
+  updateOverview();
+  updateValidationSummary();
+  renderWorkers();
+  refreshEventStream();
+  loadScenarioCatalog()
+    .then(function () { return null; })
+    .catch(function () {
+      document.getElementById('sim-desc').textContent =
+        'Scenario catalog unavailable — is the local service running?';
+    });
+  setInterval(fetchAlerts, 1500);
+  setInterval(function () {
+    updateOverview(); updateValidationSummary(); fetchSoar(); refreshDetailSoar();
+  }, 5000);
+  setInterval(refreshEventStream, 3000);
 })();

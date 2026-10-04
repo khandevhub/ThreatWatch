@@ -675,6 +675,156 @@ vs **REAL EXECUTION** labels, approvals, incidents, audit trail) rendered
 exclusively with text nodes. All SOAR writes are parameterized and transactional
 via `database.connect()`.
 
+## SOC operations (dashboard console)
+
+The dashboard at **http://127.0.0.1:5000/** is a dark SOC command center that
+runs the whole pipeline visibly: ingestion → normalization → detection →
+correlation → threat intel → risk → Jev → alert → investigation → AI/RAG →
+incident → SOAR dry-run → approval → audit. It is an operator console over the
+real engines — every number and panel is queried from the running application,
+nothing is hard-coded, and the console is labeled:
+
+> THIS IS A SYNTHETIC SECURITY VALIDATION ENVIRONMENT. This console only
+> processes synthetic events generated in the Simulation Lab; no real attacks
+> are generated, no external systems are contacted, and all SOAR response
+> actions are dry-run simulations.
+
+The console shows: status pills (system / simulation / detection / Jev / AI
+provider / SOAR dry-run), SOC counters (events, events/s, alerts, crit/high,
+investigations, incidents, pending approvals, last event), the ten SOC
+automation workers (ingest, detection, correlation, threat intel, risk, Jev,
+AI analyst, RAG, incident, SOAR), severity/MITRE/source bars, a live event
+stream (simulated lab events are labeled `LIVE SYNTHETIC`; detection-triggered
+events are highlighted), the alert queue (rule, category, source, target,
+severity, risk, Jev decision, AI status, investigation and incident state), an
+alert detail panel (explainable risk factors, entities, evidence timeline,
+related alerts, stored threat intel, deterministic MITRE mapping,
+investigation questions, evidence-bounded Ask, AI-GENERATED/ADVISORY panel
+with RAG source references, matched playbook and actions, executions,
+approvals, per-alert audit trail), a SOC Simulation Lab, Demonstration Mode,
+full SOC validation, a Threat Hunt box, and the SOAR Defense Center.
+
+### Starting ThreatWatch for SOC operations
+
+```bash
+# PowerShell
+$env:DB_FILE = "$env:TEMP\tw_soc.sqlite"
+$env:INGEST_TOKEN = "change-me-0123456789abcdef-0123456789"   # >= 32 chars
+$env:AI_LLM_PROVIDER = "mock"
+uv run python app.py
+
+# Bash
+dbi="$TEMP/tw_soc.sqlite"; tok="change-me-0123456789abcdef-0123456789"
+export DB_FILE="$dbi" INGEST_TOKEN="$tok" AI_LLM_PROVIDER=mock
+uv run python app.py
+```
+
+Then open **http://127.0.0.1:5000/**. `INGEST_TOKEN` protects the write
+endpoints (simulation, reset, validation, demo, SOAR actions, incident
+creation, AI runs); paste it into the **Console token** field at the top of
+the dashboard. Read-only endpoints (alert queue, overview, event stream,
+public incidents) stay unauthenticated for loopback use — see
+[Current limitations](#current-limitations).
+
+### AI modes
+
+- `AI_LLM_PROVIDER=mock` — deterministic offline **MOCK AI / DEMONSTRATION**
+  provider (model `mock-copilot-v1`). The AI pill shows `AI: MOCK (ADVISORY)`
+  and every AI panel is labeled `AI-GENERATED / ADVISORY` with
+  "advisory only, can be wrong". No network calls.
+- `AI_LLM_PROVIDER=disabled` (default) — AI panels honestly report
+  `AI status: unavailable` and detection/Jev/risk are unaffected. The status
+  pill shows `AI: DISABLED`.
+- `AI_LLM_PROVIDER=openai-compatible` (+ `AI_LLM_ENDPOINT`, `AI_LLM_MODEL`,
+  `AI_LLM_API_KEY`) — live advisory AI. The pill shows `AI: LIVE (ADVISORY)`.
+  See [AI investigation copilot](#ai-investigation-copilot-phase-4e–4k).
+
+Jev, RAG, and SOAR behavior are unchanged by the console: Jev is the
+deterministic decision layer from [Phase 2](#correlation-risk-and-the-jev-decision-layer)
+(`JEV_ENABLED=1` flips the pill from FALLBACK to ACTIVE), RAG is the Phase 4
+retriever whose sources are listed under each AI response, and SOAR is the
+Phase 5 engine (dry-run default ON, analyst approval gates, full audit).
+
+### Run a scenario (SOC Simulation Lab)
+
+1. Pick a scenario (15 available — 11 malicious, 3 benign, 1 designed
+   false-positive mix). The description shows the expected rule, severity, and
+   MITRE technique **before** you run it; expected values never influence the
+   actual pipeline.
+2. **Generate events** → synthetic ThreatWatch events are stored (labeled
+   `soc-simulation`, no commands run, no network activity).
+3. **Process events** → the real detection/correlation/risk/Jev pipeline runs;
+   alerts appear in the queue and the stream shows detection highlights.
+4. Or click **Run full pipeline ▶** to do both and watch the 12-stage
+   pipeline progress, the worker statuses change, and the attack path
+   (ATTACKER → events → DETECTION → JEV → MITRE → AI → INCIDENT+SOAR) built
+   from the actual run data.
+
+### Run full SOC validation
+
+Click **RUN FULL SOC VALIDATION (15 scenarios)**. Every scenario runs against
+the real engine and the table reports expected vs actual rule, severity, risk,
+MITRE, AI status, per-check results, and an outcome. Totals show
+Runs/Passed/Warnings/Failed. Honesty rules:
+
+- deterministic detection succeeded + AI disabled → **WARNING** (`failed: ai`),
+  never a failure;
+- benign scenarios must stay silent to **PASS**;
+- the designed false positive (Mixed/Ambiguous) surfaces as
+  **WARNING (designed FP)** — false positives are never hidden.
+
+### Reset the demo
+
+**⟲ RESET SOC DEMO** (or `POST /api/simulation/reset`, or
+`uv run python tools/reset_demo.py --dry-run`) removes only lab state:
+simulation events/alerts/runs plus the alerts' investigations, AI results,
+enrichment, SOAR executions, approvals, incidents, and validation runs whose
+every alert was lab-sourced. Configuration, rules, the knowledge base, AI/Jev
+configuration, and any non-simulation data are never touched.
+
+### SOC console API (new in this phase)
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `GET /api/rules` | none | Detection-rule catalog incl. thresholds |
+| `GET /api/events/recent?limit=N` | none | Bounded newest events for the live stream |
+| `GET /api/soc/overview` | none | SOC counters + configured AI provider |
+| `GET /api/soc/alerts`, `GET /api/soc/alerts/<id>` | none | Queue rows / detail (entities, hostnames, playbooks) |
+| `GET /api/soc/alerts/<id>/full` | none | Consolidated analyst view (investigation + AI + SOAR + audit) |
+| `GET /api/soc/alerts/<id>/soar` | none | Lightweight SOAR/approval/audit poll for an open detail |
+| `POST /api/simulation/scenarios/<id>/generate` | bearer | Generate one scenario's synthetic events |
+| `POST /api/simulation/scenarios/<id>/process` | bearer | Run the real pipeline over one run |
+| `GET /api/simulation/runs/<id>/events` | none | Run events + alerts incl. MITRE + source event ids |
+| `POST /api/simulation/reset` | bearer | Lab-state reset (scope above) |
+| `POST /api/simulation/validate-all` | bearer | 15-scenario validation (expected vs actual) |
+| `POST /api/simulation/demo` | bearer | One-shot SOC lifecycle demo (10 steps) |
+| `POST /api/soar/executions/<id>/advance` | bearer | Drive PENDING→VALIDATING→(WAITING_APPROVAL)→APPROVED→RUNNING→SUCCEEDED; never bypasses a gate |
+| `POST /api/alerts/<id>/incident` | bearer | Create incident for an alert (idempotent) |
+
+### 10-MINUTE SOC DEMO
+
+1. **Start (1 min).** Set `DB_FILE`, `INGEST_TOKEN` (≥ 32 chars),
+   `AI_LLM_PROVIDER=mock`; run `uv run python app.py`; open
+   http://127.0.0.1:5000/; paste the token into the console field.
+2. **Baseline (2 min).** Simulation Lab → *Benign Authentication Activity* →
+   **Run full pipeline ▶**. Stream fills with `LIVE SYNTHETIC` events; no
+   alerts. Then *Benign Administrative PowerShell* — still silent.
+3. **Attack (3 min).** Scenario *Brute Force* → **Run full pipeline ▶**.
+   Watch the 12-stage progress and workers; alert `TW-001 BRUTE_FORCE`
+   appears (HIGH, risk with factor explanation, T1110). Open the alert:
+   entities (source IP / user / host), evidence timeline, Jev decision,
+   deterministic MITRE, investigation questions, the labeled advisory AI
+   panel with RAG sources, and the matched `TW-PB-001` playbook.
+4. **Respond (3 min).** Click **Execute playbook (dry-run by default)** →
+   execution advances to `WAITING_APPROVAL` → click **Approve** →
+   `APPROVED → RUNNING → SUCCEEDED`, every step in the SOC audit trail.
+   Alternatively click **▶ START SOC DEMO** to walk benign baseline → attack
+   → detection → Jev → AI → incident → SOAR → approval gate → audit in one
+   click with its own approve control.
+5. **Validate & hunt (1 min).** Click **RUN FULL SOC VALIDATION (15
+   scenarios)** and read the table; hunt `failed logins from 203.0.113.10` in
+   Threat Hunt. Finish with **⟲ RESET SOC DEMO** to return to a clean state.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -737,7 +887,7 @@ evidence immutability, incident dedupe, every SOAR API path
 leakage, oversized bounds, adapter fail-closed behavior, the AI dry-run
 boundary).
 
-Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v4, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (embedding providers incl. optional semantic), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `llm_provider.py` (LLM provider seam), `ai_investigation.py` (RAG investigation engine, validation, grounding, report), `ai_hunting.py` (AI-assisted hunting), `knowledge_admin.py` (index admin CLI), `tools/ai_smoke_test.py` (optional live-LLM smoke test), `actions.py`, `playbook.py`, and `soar.py` (Phase 5 SOAR action providers, playbook/trigger/policy engines, and execution engine), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search, AI copilot and SOAR endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
+Important files: `event_model.py` (versioned validation/normalization), `database.py` (authoritative SQLite schema, v5, and durable cursors), `collector.py` (JSONL tail and quarantine), `rules.py` (rule registry/metadata and ATT&CK technique names), `detections.py` (detection engine), `threat_intel.py` (indicator classification/enrichment), `correlator.py` (grouping/suppression), `risk.py` (explainable scoring), `decision.py` (Jev provider abstraction), `detector.py` (pipeline orchestration), `evidence.py` (redaction/timeline/evidence model), `investigation.py` (investigation packages), `hunting.py` (bounded hunt queries), `investigation_provider.py` (advisory AI seam), `vector_store.py` (SQLite vector store), `embeddings.py` (embedding providers incl. optional semantic), `knowledge.py` (ingestion/chunking), `retrieval.py` (retriever/RAG context), `llm_provider.py` (LLM provider seam), `ai_investigation.py` (RAG investigation engine, validation, grounding, report), `ai_hunting.py` (AI-assisted hunting), `knowledge_admin.py` (index admin CLI), `tools/ai_smoke_test.py` (optional live-LLM smoke test), `actions.py`, `playbook.py`, and `soar.py` (Phase 5 SOAR action providers, playbook/trigger/policy engines, and execution engine), `soc_simulation.py` (synthetic SOC scenario lab: 15 scenarios, run lifecycle, validation, demo, scoped reset), `tools/reset_demo.py` (lab-state reset CLI), `app.py` (dashboard API, protected ingestion, investigation lifecycle/endpoints, knowledge search, AI copilot and SOAR endpoints, SOC console endpoints), `simulator/` (catalogs/writers), `templates/` and `static/` (dashboard), `tests/`, `compose.yaml`, and `Dockerfile`.
 
 ## Current limitations
 
@@ -755,5 +905,6 @@ Important files: `event_model.py` (versioned validation/normalization), `databas
 - The vector store is a single-file SQLite index with in-process cosine search; it is not a distributed or approximate-nearest-neighbor engine, and indexes are per-database file.
 - Knowledge ingestion is bounded to explicit sources (rules, ATT&CK mappings, local intel CSV, generated guides, structural incident summaries, and the fixed README/LICENSE allowlist); it does not crawl arbitrary repositories or files.
 - Dashboard and read-only alert APIs have no user accounts/RBAC; keep them on loopback or add an authenticated access layer before any remote exposure.
+- The SOC console is a local operator view over the same single-file SQLite deployment: simulation state, suppression, and validation history are per-database, the live stream and polling are simple bounded intervals (no websocket layer), and the validation history is kept per database via the simulation lab. The console AI panel shows the mock provider's deterministic output when `AI_LLM_PROVIDER=mock`; it is demonstration tooling, not a model.
 - SQLite and the in-process rate limiter are for a single local deployment, not a multi-node service.
 - The hunting layer is exact/substring over stored events with alert linkage; there is no Sigma parser, saved-query workbench, cross-database federated search, or case management.

@@ -149,6 +149,17 @@ class Correlator:
             evidence['affected_host_count'] = len(hosts)
         event_count = sum(len(f.event_ids) for f in members)
         evidence['event_count'] = event_count
+        processes = sorted({p for f in members for p in f.evidence.get('processes', [])
+                            } | {f.evidence.get('process_name') for f in members
+                                 if f.evidence.get('process_name')})
+        if processes:
+            evidence['processes'] = processes
+        command_lines = sorted({c for f in members
+                                for c in f.evidence.get('command_lines', [])
+                                } | {f.evidence.get('command_line') for f in members
+                                     if f.evidence.get('command_line')})
+        if command_lines:
+            evidence['command_lines'] = command_lines
         techniques = sorted({t for f in members for t in f.mitre})
         if techniques:
             evidence['mitre_techniques'] = techniques

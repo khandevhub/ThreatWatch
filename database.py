@@ -7,7 +7,7 @@ import sqlite3
 import time
 
 DB = os.environ.get('DB_FILE', 'db.sqlite')
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class EventIdConflictError(ValueError):
@@ -328,6 +328,63 @@ def init_db(db_file=None):
             connection.execute(
                 'CREATE INDEX IF NOT EXISTS idx_soar_audit_alert '
                 'ON soar_audit(alert_id)')
+            # -- SOC operations integration (schema v5) ------------------------
+            # Simulation runs and persisted AI investigation results. Rows are
+            # written only by soc_simulation.py; everything is attributable and
+            # removable by the demo reset without touching non-simulation data.
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS simulation_runs (
+                    run_id TEXT PRIMARY KEY,
+                    scenario_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('generated', 'processed')),
+                    event_count INTEGER NOT NULL CHECK (event_count >= 0),
+                    generated_at TEXT NOT NULL,
+                    processed_at TEXT,
+                    updated_at TEXT,
+                    event_ids_json TEXT NOT NULL,
+                    validation_json TEXT
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS simulation_events (
+                    run_id TEXT NOT NULL REFERENCES simulation_runs(run_id)
+                        ON DELETE CASCADE,
+                    event_index INTEGER NOT NULL CHECK (event_index >= 0),
+                    event_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    UNIQUE (run_id, event_index)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS simulation_run_alerts (
+                    run_id TEXT NOT NULL REFERENCES simulation_runs(run_id)
+                        ON DELETE CASCADE,
+                    alert_id INTEGER NOT NULL,
+                    UNIQUE (run_id, alert_id)
+                )
+            ''')
+            connection.execute('''
+                CREATE TABLE IF NOT EXISTS ai_investigation_results (
+                    alert_id INTEGER PRIMARY KEY,
+                    ai_schema_version TEXT,
+                    status TEXT NOT NULL,
+                    response_json TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            ''')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_simulation_events_run '
+                'ON simulation_events(run_id, event_index)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_simulation_alerts_run '
+                'ON simulation_run_alerts(run_id)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_alerts_severity '
+                'ON alerts(severity, id DESC)')
+            connection.execute(
+                'CREATE INDEX IF NOT EXISTS idx_alerts_investigation_status '
+                'ON alerts(investigation_status, id DESC)')
             # Phase 2 lifecycle values canonicalize to the Phase 3 states.
             if version < 3:
                 connection.execute(
