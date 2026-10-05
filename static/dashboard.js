@@ -227,7 +227,23 @@
     panel.replaceChildren(line('Loading alert #' + alertId + ' …'));
     panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
     fetchJSON('/api/soc/alerts/' + encodeURIComponent(alertId) + '/full')
-      .then(function (full) { renderAlertDetail(panel, full); })
+      .then(function (full) {
+        renderAlertDetail(panel, full);
+        // WHY panel + decision chain + analyst case come from the stored
+        // decision endpoint (no AI engine call).
+        return fetchJSON('/api/alerts/' + encodeURIComponent(alertId)
+          + '/decision').then(function (decision) {
+          if (currentAlertId !== alertId) return null;
+          var why = el('div', 'why-region');
+          panel.insertBefore(why, panel.firstChild.nextSibling);
+          renderWhyPanel(why, decision);
+          renderDecisionChain(why, decision);
+          var caseWrap = el('div', 'case-region');
+          panel.appendChild(caseWrap);
+          renderCasePanel(caseWrap, { id: alertId }, decision);
+          return null;
+        });
+      })
       .catch(function (error) {
         panel.replaceChildren(line('Unable to load alert detail: ' + error.message,
           'meta soar-err'));
@@ -656,6 +672,435 @@
       + ' [' + scenario.classification + ']';
   }
 
+  // ------------------------------------------------------------------
+  // Attack Replay: event-by-event through the real pipeline
+  // ------------------------------------------------------------------
+
+  var currentReplayId = null;
+
+  function startReplay() {
+    var out = document.getElementById('replay-progress');
+    var headers = authHeaders();
+    if (!headers.Authorization) {
+      out.replaceChildren(line('Enter the console token above to start a replay '
+        + '(protected action).', 'meta soar-err'));
+      return;
+    }
+    if (!currentRunId) {
+      out.replaceChildren(line('Generate a scenario in the Simulation Lab first, '
+        + 'then replay it here.', 'meta'));
+      return;
+    }
+    var delay = document.getElementById('replay-delay').value || '400';
+    out.replaceChildren(line('Starting SYNTHETIC / LAB replay of run '
+      + currentRunId + ' …'));
+    fetchJSON('/api/simulation/replay', {
+      method: 'POST', headers: headers,
+      body: JSON.stringify({ run_id: currentRunId,
+        step_delay_ms: parseInt(delay, 10) }),
+    }).then(function (replay) {
+      currentReplayId = replay.replay_id;
+      renderReplayProgress(replay);
+      stepReplay();
+      return null;
+    }).catch(function (error) {
+      out.replaceChildren(line('Replay failed to start: ' + error.message,
+        'meta soar-err'));
+    });
+  }
+
+  function stepReplay() {
+    if (!currentReplayId) return;
+    fetchJSON('/api/simulation/replays/'
+      + encodeURIComponent(currentReplayId) + '/step', {
+      method: 'POST', headers: authHeaders(),
+    }).then(function (data) {
+      renderReplayProgress(data.replay);
+      if (data.step) appendReplayStep(data.step, data.replay);
+      var done = data.replay.status === 'complete';
+      if (!done) {
+        var delay = parseInt(
+          document.getElementById('replay-delay').value || '400', 10);
+        setTimeout(stepReplay, delay);
+      } else {
+        refreshAll();
+      }
+      return null;
+    }).catch(function (error) {
+      document.getElementById('replay-progress').replaceChildren(
+        line('Replay step failed: ' + error.message, 'meta soar-err'));
+    });
+  }
+
+  function renderReplayProgress(replay) {
+    var out = document.getElementById('replay-progress');
+    var pct = replay.total_events
+      ? Math.round(100 * replay.processed_events / replay.total_events) : 0;
+    out.replaceChildren(line('SYNTHETIC / LAB — replay ' + replay.replay_id
+      + ' — scenario ' + replay.scenario_id + ' — event '
+      + replay.processed_events + '/' + replay.total_events
+      + ' (' + pct + '%) — status ' + replay.status.toUpperCase()));
+  }
+
+  function appendReplayStep(step, replay) {
+    var container = document.getElementById('replay-steps');
+    var row = el('div', 'replay-step'
+      + (step.alert_ids.length ? ' replay-step-alert' : ''));
+    row.appendChild(line('#' + (step.event_index + 1) + '  '
+      + step.event_id + (step.accepted ? '  accepted' : '  duplicate'),
+      'meta'));
+    if (step.alert_ids.length) {
+      row.appendChild(line('⚠ DETECTION TRIGGERED — alert #'
+        + step.alert_ids.join(', #')
+        + ' — opening the alert shows the full WHY panel', 'ask-ans'));
+    }
+    container.appendChild(row);
+    if (container.children.length > 130) container.removeChild(container.firstChild);
+  }
+
+  function resetReplay() {
+    currentReplayId = null;
+    document.getElementById('replay-progress').replaceChildren(
+      line('Replay cleared. Generate a scenario and press START REPLAY.', 'meta'));
+    document.getElementById('replay-steps').replaceChildren();
+  }
+
+  // ------------------------------------------------------------------
+  // WHY THREATWATCH ALERTED panel + decision chain (alert detail)
+  // ------------------------------------------------------------------
+
+  function chipFor(value, kind) {
+    var cls = 'chip';
+    if (kind === 'bad' || value === 'HIGH' || value === 'CRITICAL'
+      || value === 'confirmed_threat' || value === 'SUCCEEDED') cls += ' chip-bad';
+    else if (kind === 'warn' || value === 'MEDIUM' || value === 'investigating'
+      || value === 'WAITING_APPROVAL' || value === 'RUNNING' || value === 'PENDING'
+      || value === 'pending') cls += ' chip-warn';
+    else if (kind === 'info' || value === 'LOW' || value === 'false_positive'
+      || value === 'closed') cls += ' chip-info';
+    else if (kind === 'ok') cls += ' chip-ok';
+    return el('span', cls, value || '—');
+  }
+
+  function renderDecisionChain(panel, decision) {
+    var wrap = addSection(panel, 'DECISION CHAIN — DETECTION TO RESPONSE');
+    var chain = el('div', 'decision-chain');
+    var jevStatus = (decision.jev || {}).status || 'not_recorded';
+    var aiStatus = (decision.ai || {}).status || 'not_run';
+    var caseState = decision.case ? decision.case.status : 'no case';
+    var execs = (decision.soar || {}).executions || [];
+    var execState = execs.length ? execs[0].state : 'not started';
+    var stages = [
+      ['EVENTS', decision.detection.matched_events + ' ingested'],
+      ['DETECTION', (decision.detection.rule_id || decision.detection.rule)
+        + ' fired'],
+      ['EVIDENCE', decision.detection.source_event_ids.length
+        + ' linked events'],
+      ['RISK', (decision.risk.score == null ? '—' : decision.risk.score + '/100 '
+        + (decision.risk.band || ''))],
+      ['JEV', jevStatus + (decision.jev.priority
+        ? ' · ' + decision.jev.priority : '')],
+      ['AI / RAG', aiStatus + (aiStatus === 'disabled' ? ' (deterministic only)'
+        : aiStatus === 'ok' ? ' (advisory)' : '')],
+      ['INCIDENT', decision.case ? 'case ' + decision.case.case_id
+        : (decision.incident_ids.length ? 'incident created' : 'not created')],
+      ['ANALYST', caseState.toUpperCase()],
+      ['SOAR', execState + (execs.length && execs[0].dry_run
+        ? ' (dry run)' : '')],
+    ];
+    stages.forEach(function (stage, index) {
+      var node = el('div', 'chain-node');
+      node.appendChild(el('span', 'chain-stage', stage[0]));
+      node.appendChild(el('span', 'chain-state', stage[1]));
+      chain.appendChild(node);
+      if (index < stages.length - 1) {
+        chain.appendChild(el('span', 'chain-arrow', '↓'));
+      }
+    });
+    wrap.appendChild(chain);
+  }
+
+  function renderWhyPanel(panel, decision) {
+    var wrap = addSection(panel, 'WHY THREATWATCH ALERTED');
+    var identity = decision.identity;
+    var detection = decision.detection;
+
+    var head = el('div', 'why-grid');
+    head.appendChild(el('div', 'why-label', 'DETECTION'));
+    head.appendChild(el('div', 'why-value',
+      (detection.rule_id || '—') + ' ' + (detection.rule || '')));
+
+    head.appendChild(el('div', 'why-label', 'EVIDENCE'));
+    var evidence = el('div', 'why-value');
+    evidence.appendChild(line('✓ ' + detection.matched_events
+      + ' matching event(s) linked to this alert'));
+    evidence.appendChild(line('✓ Source IP: '
+      + (identity.source_ips.join(', ') || 'none observed')));
+    if (identity.affected_users.length) {
+      evidence.appendChild(line('✓ Affected user(s): '
+        + identity.affected_users.join(', ')));
+    }
+    if (identity.hostnames.length) {
+      evidence.appendChild(line('✓ Affected host(s): '
+        + identity.hostnames.join(', ')));
+    }
+    if (detection.correlation_id) {
+      evidence.appendChild(line('✓ Correlation group: '
+        + detection.correlation_id));
+    }
+    head.appendChild(evidence);
+
+    head.appendChild(el('div', 'why-label', 'RISK CALCULATION'));
+    var riskBox = el('div', 'why-value why-risk');
+    var factors = decision.risk.factors || {};
+    Object.keys(factors).forEach(function (name) {
+      var row = el('div', 'risk-factor-row');
+      row.appendChild(el('span', 'risk-factor-name', name.replace(/_/g, ' ')));
+      row.appendChild(el('span', 'risk-factor-pts',
+        '+' + factors[name]));
+      riskBox.appendChild(row);
+    });
+    var totalRow = el('div', 'risk-factor-row risk-total');
+    totalRow.appendChild(el('span', 'risk-factor-name',
+      'RISK SCORE'));
+    totalRow.appendChild(el('span', 'risk-factor-pts',
+      (decision.risk.score == null ? '—' : decision.risk.score + '/100')
+      + ' (' + (decision.risk.band || '—') + ')'));
+    riskBox.appendChild(totalRow);
+    if (decision.risk.explanation) {
+      riskBox.appendChild(line(decision.risk.explanation, 'meta'));
+    }
+    head.appendChild(riskBox);
+
+    head.appendChild(el('div', 'why-label', 'CLASSIFICATION'));
+    var sevBox = el('div', 'why-value');
+    sevBox.appendChild(chipFor(identity.severity, 'sev'));
+    head.appendChild(sevBox);
+
+    head.appendChild(el('div', 'why-label', 'MITRE ATT&CK'));
+    head.appendChild(el('div', 'why-value',
+      (decision.mitre.techniques.join(', ') || 'none recorded')));
+
+    head.appendChild(el('div', 'why-label', 'JEV (DETERMINISTIC)'));
+    var jevBox = el('div', 'why-value');
+    jevBox.appendChild(chipFor((decision.jev.priority
+      || 'no decision').toUpperCase(), 'warn'));
+    jevBox.appendChild(line('provider/state: ' + decision.jev.status
+      + ' — Jev output is deterministic, never AI-generated', 'meta'));
+    head.appendChild(jevBox);
+
+    head.appendChild(el('div', 'why-label', 'AI'));
+    var aiBox = el('div', 'why-value');
+    var aiStatus = decision.ai.status || 'not_run';
+    var aiLabel = aiStatus === 'ok' ? 'ADVISORY (stored AI result)'
+      : aiStatus === 'not_run' ? 'NOT RUN — provider: '
+        + (decision.ai.provider || 'configured') + ' (advisory only)'
+      : aiStatus === 'disabled' ? 'DISABLED (deterministic engine only)'
+      : aiStatus.toUpperCase();
+    aiBox.appendChild(chipFor('AI: ' + aiLabel,
+      aiStatus === 'ok' ? 'warn' : 'info'));
+    if (decision.ai.summary) {
+      aiBox.appendChild(line('Summary: ' + decision.ai.summary, 'meta'));
+    }
+    if (decision.ai.reason) {
+      aiBox.appendChild(line('Status reason: ' + decision.ai.reason, 'meta'));
+    }
+    head.appendChild(aiBox);
+
+    head.appendChild(el('div', 'why-label', 'FINAL STATE'));
+    var finalBox = el('div', 'why-value');
+    finalBox.appendChild(chipFor(
+      decision.case ? decision.case.status.toUpperCase()
+        : (decision.incident_ids.length ? 'INCIDENT OPEN'
+          : 'ALERT OPEN — NO CASE'),
+      decision.case && decision.case.status === 'confirmed_threat'
+        ? 'bad' : 'info'));
+    head.appendChild(finalBox);
+
+    wrap.appendChild(head);
+  }
+
+  // ------------------------------------------------------------------
+  // Analyst case workflow (inside alert detail)
+  // ------------------------------------------------------------------
+
+  function renderCasePanel(panel, alert, decision) {
+    var wrap = addSection(panel, 'ANALYST CASE — DECISION WORKFLOW');
+    var body = el('div', 'case-body');
+    wrap.appendChild(body);
+    // drawCasePanel reads decision.case itself (same payload reloadDecision
+    // passes back), so an existing case renders on first detail open too.
+    drawCasePanel(body, alert, decision);
+  }
+
+  function drawCasePanel(container, alert, decision) {
+    container.replaceChildren();
+    var caseInfo = decision && decision.case;
+    if (!caseInfo) {
+      var startBtn = el('button', 'soar-btn', 'Start investigation (open case)');
+      startBtn.type = 'button';
+      startBtn.addEventListener('click', function () {
+        openCaseForAlert(alert.id, container, decision);
+      });
+      container.appendChild(line('No analyst case yet for this alert.', 'meta'));
+      container.appendChild(startBtn);
+      return;
+    }
+    container.appendChild(line('Case ' + caseInfo.case_id
+      + ' — incident ' + caseInfo.incident_id + ' — analyst '
+      + caseInfo.analyst, 'meta'));
+    var stateRow = el('div', 'case-states');
+    var states = ['NEW', 'INVESTIGATING', decision.case.decision === 'false_positive'
+      ? 'FALSE POSITIVE' : 'CONFIRMED THREAT', 'CLOSED'];
+    var order = ['new', 'investigating', decision.case.decision
+      === 'false_positive' ? 'false_positive' : 'confirmed_threat', 'closed'];
+    var activeIdx = order.indexOf(caseInfo.status);
+    states.forEach(function (label, index) {
+      var node = el('span', 'case-state'
+        + (index === activeIdx ? ' case-state-active'
+          : (index < activeIdx ? ' case-state-done' : '')), label);
+      stateRow.appendChild(node);
+      if (index < states.length - 1) {
+        stateRow.appendChild(el('span', 'chain-arrow', '→'));
+      }
+    });
+    container.appendChild(stateRow);
+
+    var noteInput = el('input', 'ask-input');
+    noteInput.type = 'text';
+    noteInput.maxLength = 2000;
+    noteInput.placeholder = 'Analyst note (required for confirm/false-positive)…';
+    var noteBtn = el('button', 'soar-btn', 'Add note');
+    noteBtn.type = 'button';
+    noteBtn.addEventListener('click', function () {
+      if (!noteInput.value.trim()) return;
+      fetchJSON('/api/cases/' + encodeURIComponent(caseInfo.case_id)
+        + '/notes', {
+        method: 'POST', headers: authHeaders(),
+        body: JSON.stringify({ note: noteInput.value.trim() }),
+      }).then(function () {
+        noteInput.value = '';
+        reloadDecision(alert.id, container, decision);
+        return null;
+      }).catch(function (error) {
+        container.appendChild(line('Note failed: ' + error.message,
+          'meta soar-err'));
+      });
+    });
+    container.appendChild(noteInput);
+    container.appendChild(noteBtn);
+
+    var actions = el('div', 'case-actions');
+    function transitionButton(label, toState, needsNote) {
+      var btn = el('button', 'soar-btn'
+        + (toState === 'false_positive' ? ' soar-btn-bad' : ''), label);
+      btn.type = 'button';
+      btn.addEventListener('click', function () {
+        var note = noteInput.value.trim();
+        if (needsNote && !note) {
+          container.appendChild(line('A note is required to mark this case '
+            + to_state + '.', 'meta soar-err'));
+          return;
+        }
+        var payload = { to_state: toState };
+        if (note) payload.note = note;
+        fetchJSON('/api/cases/' + encodeURIComponent(caseInfo.case_id)
+          + '/transition', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify(payload),
+        }).then(function () {
+          noteInput.value = '';
+          reloadDecision(alert.id, container, decision);
+          return null;
+        }).catch(function (error) {
+          container.appendChild(line('Transition failed: ' + error.message,
+            'meta soar-err'));
+        });
+      });
+      actions.appendChild(btn);
+    }
+    if (caseInfo.status === 'new') {
+      transitionButton('Begin investigating', 'investigating', false);
+      transitionButton('Confirm threat', 'confirmed_threat', true);
+      transitionButton('Mark false positive', 'false_positive', true);
+    } else if (caseInfo.status === 'investigating') {
+      transitionButton('Confirm threat', 'confirmed_threat', true);
+      transitionButton('Mark false positive', 'false_positive', true);
+      transitionButton('Close case', 'closed', false);
+    } else if (caseInfo.status === 'confirmed_threat'
+      || caseInfo.status === 'false_positive') {
+      transitionButton('Close case', 'closed', false);
+      transitionButton('Reopen (investigating)', 'investigating', false);
+    }
+    container.appendChild(actions);
+
+    if (caseInfo.decision) {
+      container.appendChild(line('Analyst decision: '
+        + caseInfo.decision.toUpperCase(), 'ask-ans'));
+    }
+    var notes = caseInfo.notes || [];
+    if (notes.length) {
+      var notesBox = el('div', 'case-notes');
+      notes.forEach(function (note) {
+        notesBox.appendChild(line('[' + note.created_at + '] '
+          + note.author + ': ' + note.body, 'meta'));
+      });
+      container.appendChild(notesBox);
+    }
+    if (caseInfo.status === 'closed' && caseInfo.incident_id) {
+      var reportBtn = el('button', 'soar-btn btn-primary',
+        'Export investigation report (HTML)');
+      reportBtn.type = 'button';
+      reportBtn.addEventListener('click', function () {
+        window.open('/api/incidents/'
+          + encodeURIComponent(caseInfo.incident_id) + '/report', '_blank');
+      });
+      container.appendChild(reportBtn);
+    }
+  }
+
+  function openCaseForAlert(alertId, container, decision) {
+    fetchJSON('/api/alerts/' + encodeURIComponent(alertId) + '/case')
+      .then(function (data) {
+        if (data.case) {
+          reloadDecision(alertId, container, decision);
+          return null;
+        }
+        // Need the incident first: create one, then open the case on it.
+        return fetchJSON('/api/alerts/' + encodeURIComponent(alertId)
+          + '/incident', {
+          method: 'POST', headers: authHeaders(),
+          body: JSON.stringify({ actor: 'analyst' }),
+        }).then(function (created) {
+          return fetchJSON('/api/incidents/'
+            + encodeURIComponent(created.incident_id) + '/case', {
+            method: 'POST', headers: authHeaders(),
+            body: JSON.stringify({ analyst: 'analyst' }),
+          });
+        }).then(function () {
+          reloadDecision(alertId, container, decision);
+          refreshAll();
+          return null;
+        });
+      })
+      .catch(function (error) {
+        container.appendChild(line('Case open failed: ' + error.message,
+          'meta soar-err'));
+      });
+  }
+
+  function reloadDecision(alertId, container, decision) {
+    fetchJSON('/api/alerts/' + encodeURIComponent(alertId) + '/decision')
+      .then(function (fresh) {
+        drawCasePanel(container, { id: alertId }, fresh);
+        return null;
+      })
+      .catch(function (error) {
+        container.appendChild(line('Case refresh failed: ' + error.message,
+          'meta soar-err'));
+      });
+  }
+
   function runSimulation(step) {
     var select = document.getElementById('sim-scenario');
     var scenarioId = select.value;
@@ -990,26 +1435,43 @@
     if (actorValue) {
       params.set('actor', actorValue);
     }
-    return Promise.allSettled(
-      [fetchJSON('/api/soar/executions?limit=10').then(function (data) {
-        var ids = (data.executions || []).map(function (e) { return e.execution_id; });
-        return Promise.allSettled(ids.map(function (id) {
-          return fetchJSON('/api/soar/executions/'
-            + encodeURIComponent(id) + '/audit');
-        })).then(function (batches) {
-          var rows = [];
-          batches.forEach(function (batch) {
-            if (batch.status !== 'fulfilled') return;
-            var actorMatch = !actorValue ||
-              (batch.value.audit || []).some(function (entry) {
-                return (entry.actor || '').indexOf(actorValue) !== -1;
-              });
-            if (actorMatch) rows.push.apply(rows, batch.value.audit || []);
-          });
-          soarFillList('soc-audit', rows.slice(0, 40).map(buildAuditEntry));
+    var executionRows = fetchJSON('/api/soar/executions?limit=10').then(function (data) {
+      var ids = (data.executions || []).map(function (e) { return e.execution_id; });
+      return Promise.allSettled(ids.map(function (id) {
+        return fetchJSON('/api/soar/executions/'
+          + encodeURIComponent(id) + '/audit');
+      })).then(function (batches) {
+        var rows = [];
+        batches.forEach(function (batch) {
+          if (batch.status !== 'fulfilled') return;
+          var actorMatch = !actorValue ||
+            (batch.value.audit || []).some(function (entry) {
+              return (entry.actor || '').indexOf(actorValue) !== -1;
+            });
+          if (actorMatch) rows.push.apply(rows, batch.value.audit || []);
         });
-      })]
-    ).then(function () {});
+        return rows;
+      });
+    });
+    // Analyst-case decisions are soar_audit rows with no execution; merge
+    // them in so the trail is complete (workflow events + case events).
+    var caseRows = fetchJSON('/api/soc/case-audit?limit=40').then(function (data) {
+      return (data.audit || []).filter(function (entry) {
+        return !actorValue || (entry.actor || '').indexOf(actorValue) !== -1;
+      });
+    }).catch(function () { return []; });
+    return Promise.allSettled([executionRows, caseRows]).then(function (results) {
+      var rows = [];
+      results.forEach(function (result) {
+        if (result.status === 'fulfilled' && Array.isArray(result.value)) {
+          rows.push.apply(rows, result.value);
+        }
+      });
+      rows.sort(function (a, b) {
+        return (b.created_at || '').localeCompare(a.created_at || '');
+      });
+      soarFillList('soc-audit', rows.slice(0, 40).map(buildAuditEntry));
+    });
   }
 
   // ------------------------------------------------------------------
@@ -1556,6 +2018,10 @@
   if (resetBtn) resetBtn.addEventListener('click', resetDemo);
   var valBtn = document.getElementById('val-run-all');
   if (valBtn) valBtn.addEventListener('click', runFullValidation);
+  var replayBtn = document.getElementById('replay-start');
+  if (replayBtn) replayBtn.addEventListener('click', startReplay);
+  var replayResetBtn = document.getElementById('replay-reset');
+  if (replayResetBtn) replayResetBtn.addEventListener('click', resetReplay);
   document.getElementById('hunt-run').addEventListener('click', runHunt);
   fetchAlerts();
   fetchSoar();

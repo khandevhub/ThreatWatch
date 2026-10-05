@@ -30,6 +30,9 @@ from soar import (ApprovalExpiredError, ApprovalNotFoundError,
                   PlaybookNotFoundError, SOAREngine, SOARError,
                   USER_ACTOR_RE)
 from rules import load_rules
+import soc_cases
+import soc_report
+import soc_replay
 import soc_simulation
 
 logger = logging.getLogger('threatwatch.api')
@@ -482,6 +485,8 @@ def create_app(config=None):
     application.config['INGEST_TOKEN'] = validate_ingest_token(
         application.config.get('INGEST_TOKEN'))
     init_db(application.config['DB_FILE'])
+    soc_cases.ensure_case_schema(application.config['DB_FILE'])
+    soc_replay.ensure_replay_schema(application.config['DB_FILE'])
     application.extensions['ingest_rate_limiter'] = IngestRateLimiter()
 
     @application.after_request
@@ -1124,6 +1129,30 @@ def create_app(config=None):
                 audit_rows.extend(engine.list_audit(execution['execution_id'], limit=100))
             except SOARError:
                 continue
+        # Analyst-case decisions live in the same soar_audit trail but carry
+        # execution_id NULL, so the per-execution pass above misses them.
+        # Merge them in so the console shows the complete trail per alert.
+        with connect(db_file) as connection:
+            case_audit = connection.execute(
+                "SELECT id, execution_id, playbook_id, action_index, alert_id, "
+                "actor, event_type, from_state, to_state, dry_run, "
+                "approval_state, result_json, failure_reason, created_at "
+                "FROM soar_audit WHERE alert_id = ? AND execution_id IS NULL "
+                "AND event_type LIKE 'case%' ORDER BY id DESC LIMIT 50",
+                (alert_id,)).fetchall()
+        for row in case_audit:
+            view = dict(row)
+            view['dry_run'] = bool(view['dry_run'])
+            if view['result_json']:
+                try:
+                    view['result'] = json.loads(view.pop('result_json'))
+                except (TypeError, ValueError):
+                    view.pop('result_json', None)
+            else:
+                view.pop('result_json', None)
+            audit_rows.append(view)
+        audit_rows.sort(key=lambda item: item.get('created_at') or '',
+                        reverse=True)
         return {
             'matched_playbooks': playbook_matches,
             'playbook': matched_playbook,
@@ -1132,6 +1161,33 @@ def create_app(config=None):
             'approvals': approval_rows,
             'audit': audit_rows,
         }
+
+    @application.get('/api/soc/case-audit')
+    def api_soc_case_audit():
+        """Global analyst-case audit events (soar_audit rows with no execution)."""
+        try:
+            limit = max(1, min(int(request.args.get('limit', '40')), 200))
+        except ValueError:
+            limit = 40
+        with connect(application.config['DB_FILE']) as connection:
+            rows = connection.execute(
+                "SELECT id, alert_id, actor, event_type, from_state, to_state, "
+                "dry_run, result_json, failure_reason, created_at FROM soar_audit "
+                "WHERE execution_id IS NULL AND event_type LIKE 'case%' "
+                "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        audit = []
+        for row in rows:
+            view = dict(row)
+            view['dry_run'] = bool(view['dry_run'])
+            if view['result_json']:
+                try:
+                    view['result'] = json.loads(view.pop('result_json'))
+                except (TypeError, ValueError):
+                    view.pop('result_json', None)
+            else:
+                view.pop('result_json', None)
+            audit.append(view)
+        return jsonify(audit=audit)
 
     @application.get('/api/soc/alerts/<int:alert_id>/soar')
     def api_soc_alert_soar(alert_id):
@@ -1169,6 +1225,48 @@ def create_app(config=None):
             logger.exception('Simulation run creation failed')
             return jsonify(error='storage_unavailable'), 503
         return jsonify(run), 201
+
+    # -- Attack replay: feed a generated run's stored events through the
+    # REAL pipeline one at a time so the console can show every step. --
+
+    @application.post('/api/simulation/replay')
+    def api_replay_start():
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True) or {}
+        run_id = body.get('run_id') if isinstance(body, dict) else None
+        delay = body.get('step_delay_ms', 300) if isinstance(body, dict) else 300
+        try:
+            replay = soc_replay.start_replay(
+                run_id, step_delay_ms=delay,
+                db_file=application.config['DB_FILE'])
+        except soc_replay.ReplayError as exc:
+            return jsonify(error='invalid_replay', message=str(exc)), 400
+        return jsonify(replay), 201
+
+    @application.get('/api/simulation/replays/<replay_id>')
+    def api_replay_detail(replay_id):
+        replay = soc_replay.get_replay(
+            replay_id, db_file=application.config['DB_FILE'])
+        if replay is None:
+            return jsonify(error='replay_not_found'), 404
+        return jsonify(replay)
+
+    @application.post('/api/simulation/replays/<replay_id>/step')
+    def api_replay_step(replay_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        try:
+            replay, step = soc_replay.replay_step(
+                replay_id, db_file=application.config['DB_FILE'])
+        except soc_replay.ReplayError as exc:
+            message = str(exc)
+            if message.startswith('replay not found'):
+                return jsonify(error='replay_not_found', message=message), 404
+            return jsonify(error='invalid_replay_state', message=message), 409
+        return jsonify({'replay': replay, 'step': step})
 
     @application.post('/api/simulation/scenarios/<scenario_id>/process')
     def api_simulation_process(scenario_id):
@@ -1582,6 +1680,126 @@ def create_app(config=None):
             'audit': audit_rows,
             'investigations': investigations,
         })
+
+    # -- Analyst case workflow over the existing incidents -----------------
+
+    @application.post('/api/incidents/<incident_id>/case')
+    def api_case_open(incident_id):
+        """Open (idempotently) the analyst case for one incident."""
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True) or {}
+        analyst = body.get('analyst', 'analyst') if isinstance(body, dict) \
+            else 'analyst'
+        incident = _soar_engine().incident_service.get_incident(incident_id)
+        if incident is None:
+            return jsonify(error='incident_not_found'), 404
+        alert_ids = incident.get('alert_ids') or []
+        try:
+            case = soc_cases.open_case(
+                incident_id, alert_id=alert_ids[0] if alert_ids else None,
+                analyst=analyst, db_file=application.config['DB_FILE'])
+        except soc_cases.CaseError as exc:
+            return jsonify(error='invalid_request', message=str(exc)), 400
+        return jsonify(case), 201
+
+    @application.get('/api/cases')
+    def api_cases_list():
+        return jsonify({'cases': soc_cases.list_cases(
+            limit=request.args.get('limit', type=int) or 50,
+            db_file=application.config['DB_FILE'])})
+
+    @application.get('/api/cases/<case_id>')
+    def api_case_detail(case_id):
+        case = soc_cases.get_case(case_id, db_file=application.config['DB_FILE'])
+        if case is None:
+            return jsonify(error='case_not_found'), 404
+        return jsonify(case)
+
+    @application.post('/api/cases/<case_id>/transition')
+    def api_case_transition(case_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True) or {}
+        to_state = body.get('to_state') if isinstance(body, dict) else None
+        note = body.get('note') if isinstance(body, dict) else None
+        analyst = body.get('analyst', 'analyst') if isinstance(body, dict) \
+            else 'analyst'
+        try:
+            case = soc_cases.transition_case(
+                case_id, to_state, analyst=analyst, note=note,
+                db_file=application.config['DB_FILE'])
+        except soc_cases.CaseError as exc:
+            message = str(exc)
+            status = 404 if message.startswith('case not found') else 400
+            return jsonify(error='invalid_transition', message=message), status
+        return jsonify(case)
+
+    @application.post('/api/cases/<case_id>/notes')
+    def api_case_note(case_id):
+        denied = _require_bearer()
+        if denied is not None:
+            return denied
+        body = request.get_json(silent=True) or {}
+        note = body.get('note') if isinstance(body, dict) else None
+        author = body.get('analyst', 'analyst') if isinstance(body, dict) \
+            else 'analyst'
+        try:
+            case = soc_cases.add_case_note(
+                case_id, author=author, body=note,
+                db_file=application.config['DB_FILE'])
+        except soc_cases.CaseError as exc:
+            message = str(exc)
+            status = 404 if message.startswith('case not found') else 400
+            return jsonify(error='invalid_request', message=message), status
+        return jsonify(case), 201
+
+    @application.get('/api/alerts/<int:alert_id>/case')
+    def api_alert_case(alert_id):
+        case = soc_cases.case_for_alert(
+            alert_id, db_file=application.config['DB_FILE'])
+        return jsonify({'case': case})
+
+    # -- Decision explanation + investigation report ------------------------
+
+    @application.get('/api/alerts/<int:alert_id>/decision')
+    def api_alert_decision(alert_id):
+        """WHY-THREATWATCH-ALERTED explanation (stored data only)."""
+        with connect(application.config['DB_FILE']) as connection:
+            row = connection.execute(
+                'SELECT id FROM alerts WHERE id = ?', (alert_id,)).fetchone()
+        if row is None:
+            return jsonify(error='alert_not_found'), 404
+        explanation = soc_report.build_decision_explanation(
+            alert_id, db_file=application.config['DB_FILE'])
+        # Honesty: "AI disabled" and "AI configured but never run on this
+        # alert" are different states. The provider describe() is metadata
+        # only (never credentials, never a live completion).
+        ai_state = explanation.get('ai') or {}
+        if ai_state.get('status') == 'disabled':
+            try:
+                provider = make_llm_provider(os.environ).describe()
+            except Exception:
+                provider = {'provider': 'unknown', 'model': None}
+            name = (provider or {}).get('provider') or 'unknown'
+            if name != 'disabled':
+                explanation['ai'] = {
+                    'status': 'not_run', 'reason': 'ai_not_run',
+                    'provider': name, 'model': (provider or {}).get('model'),
+                }
+        return jsonify(explanation)
+
+    @application.get('/api/incidents/<incident_id>/report')
+    def api_incident_report(incident_id):
+        """Printable HTML investigation report (stored data only)."""
+        data = soc_report.build_report_data(
+            incident_id, db_file=application.config['DB_FILE'])
+        if data is None:
+            return jsonify(error='incident_not_found'), 404
+        html_document = soc_report.render_incident_report_html(data)
+        return html_document, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
     @application.post('/api/ingest')
     def api_ingest():

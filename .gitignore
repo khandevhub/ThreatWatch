@@ -13,3 +13,11 @@ venv/
 *.sqlite-wal
 *.sqlite-shm
 *.db
+
+# Local demo launcher artifacts (demo.ps1 writes to %TEMP%, never the repo)
+threatwatch-demo-*.sqlite*
+threatwatch-demo-*.log*
+
+# Logs and local tooling artifacts
+*.log
+*.log.err

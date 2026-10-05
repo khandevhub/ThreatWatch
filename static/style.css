@@ -412,3 +412,44 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 }
 
 .footer { margin-top: 20px; text-align: center; color: var(--text-faint); }
+
+/* ============================================================
+   Attack Replay — SYNTHETIC / LAB sequential event feed
+   ============================================================ */
+.replay-steps { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; max-height: 260px; overflow-y: auto; }
+.replay-step { padding: 3px 10px; border-left: 2px solid var(--border); color: var(--text-dim); font-family: var(--mono); font-size: 12px; }
+.replay-step-alert { border-left-color: var(--bad); color: var(--text); background: rgba(224, 82, 82, 0.06); }
+
+/* ============================================================
+   WHY THREATWATCH ALERTED panel
+   ============================================================ */
+.why-region { margin-bottom: 14px; }
+.why-grid { display: grid; grid-template-columns: 170px 1fr; gap: 6px 14px; align-items: start; }
+.why-label { color: var(--accent); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; padding-top: 3px; font-family: var(--mono); }
+.why-value { color: var(--text); font-size: 13px; }
+.why-risk { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--bg-inset); }
+.risk-factor-row { display: flex; justify-content: space-between; max-width: 420px; font-family: var(--mono); font-size: 12px; padding: 1px 0; }
+.risk-factor-name { color: var(--text-dim); text-transform: capitalize; }
+.risk-factor-pts { color: var(--text); }
+.risk-total { border-top: 1px solid var(--border); margin-top: 3px; padding-top: 4px; font-weight: 600; }
+.risk-total .risk-factor-pts { color: var(--accent); }
+
+/* ============================================================
+   Decision chain — compact architecture strip
+   ============================================================ */
+.decision-chain { display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: center; }
+.chain-node { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; background: var(--bg-inset); min-width: 92px; }
+.chain-stage { color: var(--accent); font-size: 10px; letter-spacing: 0.1em; font-family: var(--mono); }
+.chain-state { color: var(--text); font-size: 11px; }
+.chain-arrow { color: var(--text-faint); font-size: 12px; }
+
+/* ============================================================
+   Analyst case workflow
+   ============================================================ */
+.case-region { margin-top: 4px; }
+.case-states { display: flex; align-items: center; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+.case-state { border: 1px solid var(--border); border-radius: 12px; padding: 2px 12px; font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+.case-state-done { color: var(--ok); border-color: rgba(47, 191, 113, 0.4); }
+.case-state-active { color: var(--warn); border-color: rgba(224, 169, 62, 0.55); background: rgba(224, 169, 62, 0.08); }
+.case-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.case-notes { border-left: 2px solid var(--border-soft); margin: 6px 0; padding-left: 10px; display: flex; flex-direction: column; gap: 2px; }

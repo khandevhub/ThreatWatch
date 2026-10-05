@@ -865,6 +865,23 @@ def delete_simulation_data(db_file=None):
             connection.execute('DELETE FROM simulation_run_alerts')
             connection.execute('DELETE FROM simulation_events')
             connection.execute('DELETE FROM simulation_runs')
+            # Replay bookkeeping is a pure lab artifact; remove it entirely.
+            for table in ('soc_replay_events', 'soc_replays'):
+                try:
+                    connection.execute(f'DELETE FROM {table}')
+                except sqlite3.Error:
+                    pass
+            # Analyst cases are removed only when their incident died in the
+            # vacuum above (lab-created); cases on live incidents remain.
+            try:
+                connection.execute(
+                    'DELETE FROM soc_case_notes WHERE case_id NOT IN '
+                    '(SELECT case_id FROM soc_cases)')
+                connection.execute(
+                    'DELETE FROM soc_cases WHERE incident_id NOT IN '
+                    '(SELECT incident_id FROM soar_incidents)')
+            except sqlite3.Error:
+                pass
             if run_event_ids:
                 placeholders = ','.join('?' for _ in run_event_ids)
                 connection.execute(

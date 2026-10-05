@@ -153,6 +153,30 @@
     </div>
   </section>
 
+  <!-- ============ ATTACK REPLAY ============ -->
+  <section class='panel' id='replay-panel'>
+    <h2>Attack Replay <span class='chip chip-sim'>SYNTHETIC / LAB</span></h2>
+    <p class='meta'>Replays a generated scenario event-by-event through the real
+      ThreatWatch pipeline — one event per step, visible in the live stream above.
+      Nothing bypasses detection and no network traffic is generated; this is a
+      controlled laboratory replay of stored synthetic events.</p>
+    <div class='sim-lab'>
+      <div class='sim-buttons'>
+        <label>Pacing:
+          <select id='replay-delay'>
+            <option value='150'>Fast (150 ms)</option>
+            <option value='400' selected>Normal (400 ms)</option>
+            <option value='1000'>Slow (1 s)</option>
+          </select>
+        </label>
+        <button id='replay-start' type='button' class='btn-primary'>▶ START REPLAY</button>
+        <button id='replay-reset' type='button' class='btn-danger'>⟲ RESET</button>
+      </div>
+      <div id='replay-progress' class='sim-progress'></div>
+      <div id='replay-steps' class='replay-steps'></div>
+    </div>
+  </section>
+
   <!-- ============ DEMO MODE ============ -->
   <section class='panel panel-demo'>
     <h2>Demonstration Mode</h2>
