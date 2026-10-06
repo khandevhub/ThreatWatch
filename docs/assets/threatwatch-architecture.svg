@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 1320" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrow-dash" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0" y="0" width="980" height="1320" fill="#ffffff"/>
+  <rect x="16" y="16" width="948" height="1288" rx="12" fill="#f8fafc" stroke="#e2e8f0"/>
+
+  <!-- title -->
+  <text x="40" y="52" font-size="23" font-weight="700" fill="#0f172a">ThreatWatch — SOC pipeline</text>
+  <text x="40" y="74" font-size="13" fill="#475569">Deterministic detection first · advisory AI · human-gated dry-run response · complete audit trail</text>
+  <line x1="40" y1="88" x2="940" y2="88" stroke="#e2e8f0"/>
+
+  <!-- ============ spine boxes (center x=430, w=380) ============ -->
+  <!-- 1. security events -->
+  <rect x="240" y="108" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="108" width="5" height="56" rx="2" fill="#64748b"/>
+  <text x="262" y="131" font-size="16" font-weight="700" fill="#f1f5f9">Security Events</text>
+  <text x="262" y="150" font-size="11" fill="#94a3b8">Simulation Lab (synthetic) · JSONL · bearer API</text>
+
+  <line x1="430" y1="164" x2="430" y2="190" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 2. normalization -->
+  <rect x="240" y="192" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="192" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="215" font-size="16" font-weight="700" fill="#f1f5f9">Normalization</text>
+  <text x="262" y="234" font-size="11" fill="#94a3b8">validated versioned schema — reject, never coerce</text>
+
+  <line x1="430" y1="248" x2="430" y2="274" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 3. detection -->
+  <rect x="240" y="276" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="276" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="299" font-size="16" font-weight="700" fill="#f1f5f9">Detection Engine <tspan fill="#60a5fa" font-size="11" font-weight="600">  DETERMINISTIC</tspan></text>
+  <text x="262" y="318" font-size="11" fill="#94a3b8">10 rules declared once · MITRE ATT&amp;CK · tunable</text>
+
+  <line x1="430" y1="332" x2="430" y2="358" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 4. correlation -->
+  <rect x="240" y="360" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="360" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="383" font-size="16" font-weight="700" fill="#f1f5f9">Correlation</text>
+  <text x="262" y="402" font-size="11" fill="#94a3b8">indicator grouping · merged evidence · suppression</text>
+
+  <line x1="430" y1="416" x2="430" y2="442" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 5. threat intel -->
+  <rect x="240" y="444" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="444" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="467" font-size="16" font-weight="700" fill="#f1f5f9">Threat Intelligence</text>
+  <text x="262" y="486" font-size="11" fill="#94a3b8">typed indicators · offline CSV feed · confidence</text>
+
+  <line x1="430" y1="500" x2="430" y2="526" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 6. risk -->
+  <rect x="240" y="528" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="528" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="551" font-size="16" font-weight="700" fill="#f1f5f9">Risk Scoring</text>
+  <text x="262" y="570" font-size="11" fill="#94a3b8">explainable 0–100 factors · per-factor breakdown</text>
+
+  <line x1="430" y1="584" x2="430" y2="610" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 7. jev -->
+  <rect x="240" y="612" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="612" width="5" height="56" rx="2" fill="#7c3aed"/>
+  <text x="262" y="635" font-size="16" font-weight="700" fill="#f1f5f9">Jev Decision Layer <tspan fill="#c4b5fd" font-size="11" font-weight="600">  ADVISORY</tspan></text>
+  <text x="262" y="654" font-size="11" fill="#94a3b8">priority · likelihoods · whitelist-validated · fail-safe</text>
+
+  <line x1="430" y1="668" x2="430" y2="694" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 8. investigation cluster -->
+  <rect x="240" y="696" width="380" height="158" rx="8" fill="#0f172a"/>
+  <rect x="240" y="696" width="5" height="158" rx="2" fill="#7c3aed"/>
+  <text x="262" y="719" font-size="16" font-weight="700" fill="#f1f5f9">Investigation</text>
+  <rect x="256" y="732" width="112" height="52" rx="6" fill="#1e293b"/>
+  <text x="312" y="752" font-size="11.5" font-weight="600" fill="#e2e8f0" text-anchor="middle">Evidence</text>
+  <text x="312" y="767" font-size="10" fill="#94a3b8" text-anchor="middle">bounded · redacted</text>
+  <rect x="376" y="732" width="112" height="52" rx="6" fill="#1e293b"/>
+  <text x="432" y="752" font-size="11.5" font-weight="600" fill="#e2e8f0" text-anchor="middle">RAG</text>
+  <text x="432" y="767" font-size="10" fill="#94a3b8" text-anchor="middle">SQLite vector store</text>
+  <rect x="496" y="732" width="112" height="52" rx="6" fill="#1e293b"/>
+  <text x="552" y="752" font-size="11.5" font-weight="600" fill="#e2e8f0" text-anchor="middle">AI Copilot</text>
+  <text x="552" y="767" font-size="10" fill="#c4b5fd" text-anchor="middle">advisory · grounded</text>
+  <text x="262" y="808" font-size="11" fill="#94a3b8">+ threat hunting — whitelisted, parameterized</text>
+  <text x="262" y="826" font-size="11" fill="#94a3b8">AI honesty: disabled / not run / mock / live states</text>
+  <text x="262" y="844" font-size="11" fill="#94a3b8">ungrounded AI output never reaches an analyst</text>
+
+  <line x1="430" y1="854" x2="430" y2="880" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 9. incident -->
+  <rect x="240" y="882" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="882" width="5" height="56" rx="2" fill="#2563eb"/>
+  <text x="262" y="905" font-size="16" font-weight="700" fill="#f1f5f9">Incident</text>
+  <text x="262" y="924" font-size="11" fill="#94a3b8">alert / correlation linkage · deduplicated</text>
+
+  <line x1="430" y1="938" x2="430" y2="964" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 10. soar -->
+  <rect x="240" y="966" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="966" width="5" height="56" rx="2" fill="#059669"/>
+  <text x="262" y="989" font-size="16" font-weight="700" fill="#f1f5f9">SOAR Playbooks <tspan fill="#6ee7b7" font-size="11" font-weight="600">  DRY-RUN DEFAULT</tspan></text>
+  <text x="262" y="1008" font-size="11" fill="#94a3b8">versioned · fail-closed · allowlisted actions · idempotent</text>
+
+  <line x1="430" y1="1022" x2="430" y2="1048" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 11. human approval gate -->
+  <rect x="240" y="1050" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="1050" width="5" height="56" rx="2" fill="#d97706"/>
+  <text x="262" y="1073" font-size="16" font-weight="700" fill="#f1f5f9">Human Approval Gate <tspan fill="#fcd34d" font-size="11" font-weight="600">  ANALYST</tspan></text>
+  <text x="262" y="1092" font-size="11" fill="#94a3b8">WAITING_APPROVAL until an authenticated human decides</text>
+
+  <line x1="430" y1="1106" x2="430" y2="1132" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+
+  <!-- 12. dry-run response -->
+  <rect x="240" y="1134" width="380" height="56" rx="8" fill="#0f172a"/>
+  <rect x="240" y="1134" width="5" height="56" rx="2" fill="#059669"/>
+  <text x="262" y="1157" font-size="16" font-weight="700" fill="#f1f5f9">Dry-Run Response <tspan fill="#6ee7b7" font-size="11" font-weight="600">  NO REAL CONTAINMENT</tspan></text>
+  <text x="262" y="1176" font-size="11" fill="#94a3b8">would_execute + expected effect · fail-closed adapters</text>
+
+  <!-- ============ audit bar (full width) ============ -->
+  <line x1="430" y1="1190" x2="430" y2="1210" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#arrow)"/>
+  <rect x="40" y="1214" width="900" height="52" rx="8" fill="#334155"/>
+  <text x="62" y="1236" font-size="15" font-weight="700" fill="#f1f5f9">Audit Trail</text>
+  <text x="62" y="1254" font-size="11" fill="#cbd5e1">every transition, decision, note, and action recorded — redacted · SQLite</text>
+  <line x1="700" y1="1222" x2="700" y2="1258" stroke="#475569"/>
+  <text x="718" y="1236" font-size="11" fill="#cbd5e1">redaction + bounded payloads</text>
+  <text x="718" y="1254" font-size="11" fill="#cbd5e1">evidence immutable at execution start</text>
+
+  <!-- ============ dashboard rail (right) ============ -->
+  <rect x="688" y="108" width="252" height="368" rx="8" fill="#ffffff" stroke="#94a3b8" stroke-dasharray="5 4"/>
+  <rect x="688" y="108" width="252" height="40" rx="8" fill="#0ea5e9"/>
+  <rect x="688" y="128" width="252" height="20" fill="#0ea5e9"/>
+  <text x="814" y="133" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">SOC COMMAND CENTER</text>
+  <text x="706" y="172" font-size="11.5" font-weight="600" fill="#0f172a">Single-page analyst console</text>
+  <text x="706" y="192" font-size="11" fill="#475569">live event stream · alert queue</text>
+  <text x="706" y="211" font-size="11" fill="#475569">WHY panel · decision chain</text>
+  <text x="706" y="230" font-size="11" fill="#475569">case management · analyst notes</text>
+  <text x="706" y="249" font-size="11" fill="#475569">attack replay · simulation lab</text>
+  <text x="706" y="268" font-size="11" fill="#475569">threat hunt · SOAR defense center</text>
+  <text x="706" y="287" font-size="11" fill="#475569">audit trail · investigation report</text>
+  <line x1="706" y1="302" x2="922" y2="302" stroke="#e2e8f0"/>
+  <text x="706" y="322" font-size="11" fill="#475569">Flask + Waitress · loopback only</text>
+  <text x="706" y="341" font-size="11" fill="#475569">bearer token gates state changes</text>
+  <text x="706" y="360" font-size="11" fill="#475569">CSP + security headers</text>
+  <text x="706" y="379" font-size="11" fill="#475569">single-user local console</text>
+  <text x="706" y="398" font-size="11" fill="#475569">bounded polling — no websockets</text>
+  <line x1="706" y1="414" x2="922" y2="414" stroke="#e2e8f0"/>
+  <text x="706" y="434" font-size="11" font-style="italic" fill="#64748b">Reads from the running engines —</text>
+  <text x="706" y="453" font-size="11" font-style="italic" fill="#64748b">never from hard-coded values.</text>
+
+  <!-- dashed connectors spine -> rail -->
+  <line x1="620" y1="304" x2="688" y2="270" stroke="#64748b" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow-dash)"/>
+  <line x1="620" y1="775" x2="688" y2="420" stroke="#64748b" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow-dash)"/>
+  <line x1="620" y1="994" x2="688" y2="450" stroke="#64748b" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#arrow-dash)"/>
+
+  <!-- ============ module labels (left, mono) ============ -->
+  <text x="224" y="141" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">soc_simulation.py · collector.py</text>
+  <text x="224" y="225" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">event_model.py</text>
+  <text x="224" y="309" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">rules.py · detections.py</text>
+  <text x="224" y="393" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">correlator.py</text>
+  <text x="224" y="477" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">threat_intel.csv</text>
+  <text x="224" y="561" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">risk.py</text>
+  <text x="224" y="645" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">decision.py</text>
+  <text x="224" y="757" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">evidence.py · investigation.py</text>
+  <text x="224" y="775" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">knowledge.py · retrieval.py</text>
+  <text x="224" y="793" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">llm_provider.py · ai_hunting.py</text>
+  <text x="224" y="811" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">hunting.py</text>
+  <text x="224" y="915" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">soc_cases.py · soc_report.py</text>
+  <text x="224" y="999" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">playbook.py · actions.py · soar.py</text>
+  <text x="224" y="1151" font-family="Consolas, Menlo, monospace" font-size="10.5" fill="#64748b" text-anchor="end">actions.py (fail-closed adapters)</text>
+
+  <!-- ============ legend ============ -->
+  <rect x="40" y="1274" width="12" height="12" rx="2" fill="#2563eb"/>
+  <text x="58" y="1284" font-size="11" fill="#475569">deterministic</text>
+  <rect x="170" y="1274" width="12" height="12" rx="2" fill="#7c3aed"/>
+  <text x="188" y="1284" font-size="11" fill="#475569">advisory only</text>
+  <rect x="310" y="1274" width="12" height="12" rx="2" fill="#d97706"/>
+  <text x="328" y="1284" font-size="11" fill="#475569">human decision</text>
+  <rect x="470" y="1274" width="12" height="12" rx="2" fill="#059669"/>
+  <text x="488" y="1284" font-size="11" fill="#475569">dry-run</text>
+  <rect x="570" y="1274" width="12" height="12" rx="2" fill="#64748b"/>
+  <text x="588" y="1284" font-size="11" fill="#475569">synthetic / lab only — no real attacks</text>
+</svg>

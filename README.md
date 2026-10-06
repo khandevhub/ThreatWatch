@@ -1,6 +1,15 @@
 # ThreatWatch
 
-**Security Operations & Automation Platform**
+**AI-Assisted Security Operations Center**
+
+![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13-3776AB?logo=python&logoColor=white)
+![Flask + Waitress](https://img.shields.io/badge/Flask-Waitress-000000?logo=flask&logoColor=white)
+![SQLite](https://img.shields.io/badge/storage-SQLite-003B57?logo=sqlite&logoColor=white)
+![MITRE ATT&CK](https://img.shields.io/badge/mapping-MITRE%20ATT%26CK-B31D1B)
+![RAG](https://img.shields.io/badge/retrieval-RAG-7C3AED)
+![SOAR](https://img.shields.io/badge/response-SOAR%20dry--run-059669)
+![Tests](https://img.shields.io/badge/tests-591%20passing-16A34A)
+![License: MIT](https://img.shields.io/badge/license-MIT-8B0000)
 
 ThreatWatch is a local, offline SOC platform built to demonstrate the full
 security-operations workflow end to end: events are ingested and normalized,
@@ -15,43 +24,170 @@ It is a portfolio project, not an enterprise deployment: it processes only
 synthetic or user-supplied events, never generates real network traffic, and
 never executes destructive actions.
 
-## SOC Pipeline
+![ThreatWatch SOC Command Center — live dashboard of the full pipeline](docs/screenshots/command-center.png)
 
+*The SOC Command Center: status pills (detection online · Jev advisory · AI
+advisory · SOAR dry-run), automation workers, live counters, and severity /
+MITRE / source distributions — every value read from the running engines.*
+
+---
+
+## ▶️ Demo
+
+See ThreatWatch detect a synthetic brute-force attack, explain the finding,
+investigate it, create an incident, prepare a SOAR response, pause for human
+approval, complete a dry-run response, and record the audit trail — in about
+two minutes, with no external systems involved.
+
+![ThreatWatch guided SOC demo: detection → risk → Jev → AI → incident → human approval gate → dry-run response](docs/demo/ThreatWatch-Demo.gif)
+
+**▶️ Watch the full demo (MP4, 1 min 49 s):**
+[docs/demo/ThreatWatch-Demo.mp4](docs/demo/ThreatWatch-Demo.mp4) — recorded
+from the real dashboard: guided SOC demo → approval gate → analyst decision →
+SUCCEEDED (dry run) → alert investigation → SOAR Defense Center → audit trail.
+
+### Run it yourself
+
+```powershell
+.\demo.ps1
 ```
-Security Events (JSONL collector | bearer-authenticated POST /api/ingest)
-        ↓
-Normalization        validated SecurityEvent schema (event_model.py)
-        ↓
-Detection            deterministic rules engine, 10 rules, ATT&CK mapped
-        ↓
-Correlation          indicator grouping + duplicate suppression
-        ↓
-Threat Intelligence  offline CSV indicators, typed enrichment
-        ↓
-Risk Scoring         explainable 0–100 weighted factors
-        ↓
-Jev                  advisory structured decision (fallback-safe)
-        ↓
-Investigation
-├── Evidence model        redacted timeline + typed entities
-├── Threat Intelligence   stored enrichment + feed matches
-├── MITRE ATT&CK          deterministic technique mapping
-├── Threat Hunting        whitelisted, parameterized queries
-└── RAG                   local knowledge retrieval (SQLite vector store)
-        ↓
-AI Analysis          advisory copilot (mock | live | disabled), grounded + validated
-        ↓
-Incident             deterministic alert/correlation linkage
-        ↓
-SOAR                 playbooks → human approval gate → dry-run response
-        ↓
-Audit                every transition, decision, note, and action recorded
-```
+
+The launcher:
+
+- generates a **cryptographically secure ephemeral console token**
+  (.NET RNG) and keeps it only in the running process environment —
+  nothing is written to tracked files or committed;
+- uses the **mock AI provider** (fully offline) by default;
+- creates a **fresh local demo database** in `%TEMP%`;
+- starts ThreatWatch, prints the dashboard URL and token, and opens the
+  browser.
+
+Paste the printed token into the **Console token** field and follow the
+guided walkthrough. Stop the server with `Stop-Process -Id <printed PID>`
+(or close the terminal); the demo database can be deleted from `%TEMP%`
+any time.
+
+<details>
+<summary><strong>Full 10-minute walkthrough (21 steps)</strong></summary>
+
+1. Run `.\demo.ps1`
+2. Open the SOC Command Center.
+3. Start **Brute Force Attack Replay**.
+4. Watch synthetic events enter the pipeline (`LIVE SYNTHETIC`).
+5. Observe **TW-001** detection (`DETECTION TRIGGERED`).
+6. Open the alert.
+7. Inspect evidence (timeline, source IP, user, host).
+8. Inspect the risk score (factor-by-factor breakdown).
+9. Inspect MITRE **T1110**.
+10. Review the **Decision Chain**.
+11. Review the **Jev** state (deterministic fallback).
+12. Review the **AI/RAG** investigation (advisory, grounded).
+13. Start analyst investigation (open case).
+14. Add an analyst note.
+15. Confirm the threat (decision note required).
+16. Run the **SOAR** workflow (execute playbook, dry-run).
+17. Approve the action at the human approval gate.
+18. Review the dry-run response (`SUCCEEDED · DRY RUN`).
+19. Review the **audit trail** (workflow + case events).
+20. Export the **investigation report** (HTML).
+21. Close the case — then `⟲ RESET SOC DEMO` to clear lab state
+    (rules, playbooks, configuration, and the knowledge base survive).
+
+</details>
+
+Normal secure mode is unchanged: without the launcher, ThreatWatch requires
+you to set `INGEST_TOKEN` yourself — see [Manual Setup](#manual-setup).
+
+---
+
+## 🏗️ Architecture
+
+![ThreatWatch SOC pipeline architecture — deterministic detection, advisory Jev and AI, human approval gate, dry-run response, audit trail](docs/assets/threatwatch-architecture.svg)
 
 Every stage is real code in this repository — the dashboard reads from the
 running engines, never from hard-coded values.
 
-## Key Capabilities
+## ⚡ What's Inside
+
+| 🛡️ Detection & Triage | 🧠 Decision Intelligence | 🔎 Investigation |
+| --- | --- | --- |
+| 10 deterministic rules, declared once in `rules.py` | Explainable 0–100 risk scoring with factor breakdown | Evidence packages with bounded, redacted timelines |
+| MITRE ATT&CK mapping per rule | Jev advisory decision layer, fail-safe fallback | RAG over a local SQLite vector store |
+| Indicator correlation with duplicate suppression | Priority / likelihoods / investigation flag | Whitelisted, parameterized threat hunting |
+
+| 🤖 AI Assistance | ⚙️ SOAR | 📋 Auditability |
+| --- | --- | --- |
+| Advisory copilot: explanation, triage, reports, recommendations | Versioned playbooks with declarative triggers | Every transition, decision, note, and action recorded |
+| Strict JSON validation + anti-fabrication grounding | Mandatory dry-run default; fail-closed adapters | Redacted, bounded audit payloads |
+| Provider seam: mock / openai-compatible / disabled | Human approval gates with TTL; idempotent executions | Immutable evidence frozen at execution start |
+
+---
+
+## 🖥️ Visual Tour
+
+Captured from the running dashboard during one demo session (fresh demo
+database, mock AI provider). The **Attack Replay** and the guided **SOC
+Demo** each detect the synthetic brute-force scenario; their alerts land in
+the same correlation group.
+
+### 🚨 Detection & Triage
+
+![ThreatWatch Alert Queue with TW-001 brute force alerts, HIGH severity, risk 39/100](docs/screenshots/alert-queue.png)
+
+*Alert Queue — TW-001 Brute Force at **HIGH / risk 39/100** with Jev, AI and
+investigation state per alert; the live event stream labels every simulated
+event `LIVE SYNTHETIC`.*
+
+![ThreatWatch Attack Replay — event-by-event replay, DETECTION TRIGGERED](docs/screenshots/attack-replay.png)
+
+*Attack Replay — a stored scenario streamed event-by-event through the real
+pipeline; the moment the rule fires the panel shows `DETECTION TRIGGERED`.
+`SYNTHETIC / LAB` only — no network traffic is generated.*
+
+### 🔎 Alert Investigation
+
+![ThreatWatch alert investigation — WHY panel, evidence, AI advisory, analyst case](docs/screenshots/alert-investigation.png)
+
+*The consolidated analyst view: WHY THREATWATCH ALERTED, decision chain,
+deterministic evidence timeline, investigation questions, the advisory AI
+panel (grounded, sources listed), the SOAR workflow, and the analyst case —
+all from stored data.*
+
+![ThreatWatch WHY THREATWATCH ALERTED panel with risk factor breakdown](docs/screenshots/why-panel.png)
+
+*WHY THREATWATCH ALERTED — detection, evidence checkmarks, the full
+risk-factor calculation (39/100 · medium band · HIGH severity), MITRE
+mapping, and honest Jev (deterministic fallback) and AI (advisory, stored
+result) states.*
+
+### 🧠 Decision Chain
+
+![ThreatWatch decision chain — nine stages from events to SOAR](docs/screenshots/decision-chain.png)
+
+*Decision Chain — nine visible stages from ingestion to response, each
+showing its actual stored state: EVENTS → DETECTION → EVIDENCE → RISK → JEV
+→ AI/RAG → INCIDENT → ANALYST → SOAR.*
+
+### ⚙️ Human-Gated SOAR
+
+![ThreatWatch SOAR Defense Center — playbook execution SUCCEEDED dry run, approval resolved, incident](docs/screenshots/soar-defense-center.png)
+
+*SOAR Defense Center — the playbook executed as a **dry run and SUCCEEDED**
+only after the analyst approved it at the human gate; pending approvals are
+empty because the gate was resolved by a human decision.*
+
+### 📋 Auditability
+
+![ThreatWatch SOC audit trail — approval to execution to success, plus case events](docs/screenshots/audit-trail.png)
+
+*SOC audit trail — `execution_created → PENDING → VALIDATING →
+WAITING_APPROVAL → approved → RUNNING → SUCCEEDED (dry run)`, plus the
+analyst case events (`case_opened`, note, `confirmed_threat`). Redacted and
+bounded.*
+
+---
+
+## 🧩 Key Capabilities
 
 | Area | What is implemented |
 |---|---|
@@ -71,7 +207,7 @@ running engines, never from hard-coded values.
 | **Attack replay** | 15 synthetic SOC scenarios replayed event-by-event through the real pipeline |
 | **Auditability** | Every transition, decision, note, and action written to audit tables; secrets redacted throughout |
 
-## Detection Engineering
+## 🚨 Detection Engineering
 
 Every rule is declared once in [`rules.py`](rules.py) (id, name, stable alert
 code, severity, threshold, window, confidence, tags, ATT&CK mapping) and
@@ -97,7 +233,7 @@ distinguished: one account hammered = brute force; many distinct accounts from
 one source = spraying. Rules consume normalized events supplied through the
 API/JSONL contract — real source collection is not implemented.
 
-## Risk Scoring
+## 📈 Risk Scoring
 
 Risk is a deterministic, explainable 0–100 weighted sum
 ([`risk.py`](risk.py)): severity (30), threat-intel confidence (25), distinct
@@ -107,7 +243,7 @@ factor breakdown and a plain-language explanation; bands are low (<35),
 medium, high (≥60), critical (≥80). The dashboard shows each factor's
 contribution so the score is never a black box.
 
-## Jev Decision Layer
+## 🧠 Jev Decision Layer
 
 **Jev is advisory.** After risk scoring, ThreatWatch can ask the Jev model
 five bounded questions about an alert (priority, malicious likelihood,
@@ -119,7 +255,7 @@ optional — deterministic detection, risk scoring, alerting, and persistence
 run unchanged with Jev disabled. The dashboard labels Jev output as
 deterministic and shows its state (FALLBACK / ACTIVE / DISABLED) honestly.
 
-## AI / RAG
+## 🤖 AI / RAG
 
 - **RAG foundation**: local knowledge sources (detection rules, ATT&CK
   technique docs, intel CSV, investigation guides, historical incidents,
@@ -140,18 +276,18 @@ deterministic and shows its state (FALLBACK / ACTIVE / DISABLED) honestly.
   and `AI: MOCK/LIVE (ADVISORY)`. AI never overrides deterministic detection,
   risk, Jev, or the investigation lifecycle, and cannot execute anything.
 
-## Threat Hunting
+## 🔎 Threat Hunting
 
 `GET /api/hunt` runs whitelisted, parameterized queries over stored events:
 exact filters (`src_ip`, `dst_ip`, `event_type`, `file_hash`), redacted
-substring filters (`user`, `host`, `process`, `command`, `domain`, `url`),
-ISO-8601 time ranges, and linkage (`alert_id`, `correlation_id`, `technique` —
+substring filters (`user`, `host`, `process`, `command`, `domain`, `url`), ISO-8601
+time ranges, and linkage (`alert_id`, `correlation_id`, `technique` —
 quote-delimited so `T1110` never matches `T1110.003`). Unknown filters and
 unsafe values fail closed with 400; results are ordered, paginated (≤ 500),
 and secret-redacted. AI-assisted hunting translates natural language into the
 same validated filter catalog.
 
-## SOAR
+## ⚙️ SOAR
 
 A safe, auditable, approval-aware playbook framework — the deterministic
 engine controls execution, never the AI layer.
@@ -173,7 +309,7 @@ engine controls execution, never the AI layer.
 - **Audit**: every transition and action writes a redacted audit row;
   evidence packages are frozen and immutable at execution start.
 
-## Analyst Investigation
+## 👤 Analyst Investigation
 
 ```
 Alert → Investigate → Evidence → Decision → Incident → SOAR → Close → Audit
@@ -196,7 +332,7 @@ The dashboard consolidates this into one analyst view:
   analyst decision, SOAR, audit) that clearly distinguishes DETERMINISTIC,
   AI-GENERATED, JEV, and ANALYST DECISION content.
 
-## Attack Replay
+## 🎞️ Attack Replay
 
 The Simulation Lab generates 15 synthetic SOC scenarios (11 malicious,
 3 benign, 1 designed false positive). **Attack Replay** feeds a generated
@@ -208,56 +344,59 @@ labeled `LIVE SYNTHETIC`, and the moment a rule actually fires the replay
 shows `DETECTION TRIGGERED`. Full SOC validation (15 scenarios) compares
 expected vs actual results and never hides designed false positives.
 
-## Quick Demo
+## 🧭 WHY THREATWATCH?
 
-```powershell
-.\demo.ps1
+The core engineering idea is a **complete, honest decision loop**:
+
+```
+Detection → Decision → Investigation → Human Decision → Response → Audit
 ```
 
-The launcher:
+- **Deterministic security logic is the foundation.** Rules, correlation,
+  risk scoring, and the SOAR state machine are plain, testable code — 591
+  offline tests cover them.
+- **AI assists investigation; it never replaces detection.** The copilot
+  explains and recommends, is grounded in stored evidence, and cannot
+  execute anything or override a deterministic decision.
+- **Destructive response is not autonomous.** SOAR actions are dry-run by
+  default, and gated actions stop at `WAITING_APPROVAL` until an
+  authenticated human decides — a decision that is never inferred from AI
+  output.
+- **Everything is auditable.** From detection to response, every transition,
+  decision, note, and action is written to redacted audit tables.
 
-- generates a **cryptographically secure ephemeral console token**
-  (.NET RNG) and keeps it only in the running process environment —
-  nothing is written to tracked files or committed;
-- uses the **mock AI provider** (fully offline) by default;
-- creates a **fresh local demo database** in `%TEMP%`;
-- starts ThreatWatch, prints the dashboard URL and token, and opens the
-  browser.
+## 🛡️ Security by Design
 
-Paste the printed token into the **Console token** field and follow the
-10-minute demo below. Stop the server with `Stop-Process -Id <printed PID>`
-(or close the terminal); the demo database can be deleted from `%TEMP%`
-any time.
+| Principle | ThreatWatch approach |
+| --- | --- |
+| Deterministic detection | Security logic is plain, testable code — not model output |
+| AI safety | Advisory only, grounded in stored evidence, strictly validated; cannot execute or override |
+| Response safety | Dry-run adapters by default; fail-closed; no shell, SQL, or URL execution |
+| Human control | `WAITING_APPROVAL` gate with TTL; authenticated analyst decision, never AI-inferred |
+| Secrets | Environment-based only; ephemeral demo token; never logged, stored, or echoed |
+| Auth | Bearer token on every state-changing endpoint; missing token disables ingestion (503) |
+| Validation | Fail-closed: unknown filters, malformed playbooks, bad transitions rejected |
+| Auditability | Every transition, decision, note, and action recorded with redacted payloads |
+| Environment | Synthetic only; no real attack traffic; no external systems contacted |
 
-Normal secure mode is unchanged: without the launcher, ThreatWatch requires
-you to set `INGEST_TOKEN` yourself — see [Manual Setup](#manual-setup).
+## 🧪 Testing
 
-## 10-Minute SOC Demo
+```
+591 passed
+```
 
-1. Run `.\demo.ps1`
-2. Open the SOC Command Center.
-3. Start **Brute Force Attack Replay**.
-4. Watch synthetic events enter the pipeline (`LIVE SYNTHETIC`).
-5. Observe **TW-001** detection (`DETECTION TRIGGERED`).
-6. Open the alert.
-7. Inspect evidence (timeline, source IP, user, host).
-8. Inspect the risk score (factor-by-factor breakdown).
-9. Inspect MITRE **T1110**.
-10. Review the **Decision Chain**.
-11. Review the **Jev** state (deterministic fallback).
-12. Review the **AI/RAG** investigation (advisory, grounded).
-13. Start analyst investigation (open case).
-14. Add an analyst note.
-15. Confirm the threat (decision note required).
-16. Run the **SOAR** workflow (execute playbook, dry-run).
-17. Approve the action at the human approval gate.
-18. Review the dry-run response (`SUCCEEDED · DRY RUN`).
-19. Review the **audit trail** (workflow + case events).
-20. Export the **investigation report** (HTML).
-21. Close the case — then `⟲ RESET SOC DEMO` to clear lab state
-    (rules, playbooks, configuration, and the knowledge base survive).
+`uv run pytest -q` — fully offline. Coverage includes event validation and
+deduplication, database creation/migration, the detection rules and threat-intel
+enrichment, correlation and risk, API authentication and error handling,
+evidence/redaction, investigation packages and lifecycle, hunting (including
+injection attempts), the vector store and retrieval, the AI copilot (provider
+seam, response validation, grounding/anti-fabrication, prompt-injection as
+data, reports, recommendations, AI hunting), SOAR (playbook validation,
+triggers, dry-run, approvals, state machine, idempotency, audit redaction),
+the SOC console, attack replay, analyst cases, decision explanations, and the
+investigation report.
 
-## Manual Setup
+## 💻 Manual Setup
 
 Requires Python 3.12/3.13 and [uv](https://docs.astral.sh/uv/).
 
@@ -315,45 +454,20 @@ values; see [.env.example](.env.example)):
 | `AI_LLM_TIMEOUT_SECONDS` / `AI_LLM_MAX_OUTPUT_TOKENS` / `AI_LLM_TEMPERATURE` | `20` / `800` / `0.2` | LLM request bounds |
 | `AI_INVESTIGATION_TOP_K` / `AI_CACHE_ENABLED` | `5` / `false` | Retrieval size / evidence-hash cache |
 
-## Security
+## 🧱 Technology Stack
 
-- **Environment-based secrets** — no hard-coded credentials anywhere; tokens
-  and keys are read from the environment (or a token file) and never logged,
-  stored in results, or echoed to the UI. `.env` files are git-ignored.
-- **Bearer authentication** — every state-changing endpoint (ingestion,
-  simulation, replay, reset, SOAR, cases, AI runs) requires the token; the
-  demo launcher's token is ephemeral and never persisted.
-- **Advisory AI** — the copilot explains and recommends; it cannot execute
-  actions, bypass approval, or override deterministic decisions.
-- **Human approval gates** — gated SOAR actions stop at
-  `WAITING_APPROVAL` until an authenticated human decides.
-- **Dry-run SOAR** — dry-run is the default for every execution; destructive
-  adapters fail closed, and no adapter executes shell commands, SQL, or URLs.
-- **Fail-closed validation** — unknown filters, malformed playbooks, bad
-  transitions, and unsafe values are rejected, not coerced.
-- **Audit logging** — detection-to-response, every decision, note, and
-  action is audited with redacted, bounded payloads.
-- **Synthetic only** — the console generates no real attack traffic and
-  contacts no external systems.
+| Layer | Technology | Notes |
+|---|---|---|
+| Runtime | Python 3.12 / 3.13 · [uv](https://docs.astral.sh/uv/) | locked, reproducible envs |
+| Server | Flask + Waitress | loopback WSGI; CSP and security headers on every response |
+| Storage | SQLite (single file) | authoritative schema v5 in `database.py` |
+| Dashboard | Dependency-free vanilla JS + CSS | no build step, no CDN runtime dependency |
+| AI / RAG | Provider seam: `mock` / `openai-compatible` / `disabled` | embeddings: `local-hash` or optional fastembed |
+| Testing | pytest — 591 offline tests | `uv run pytest -q` |
+| Containers | Dockerfile · compose.yaml | local container runs |
+| License | MIT | see [LICENSE.txt](LICENSE.txt) |
 
-## Testing
-
-```
-591 passed
-```
-
-`uv run pytest -q` — fully offline. Coverage includes event validation and
-deduplication, database creation/migration, the detection rules and threat-intel
-enrichment, correlation and risk, API authentication and error handling,
-evidence/redaction, investigation packages and lifecycle, hunting (including
-injection attempts), the vector store and retrieval, the AI copilot (provider
-seam, response validation, grounding/anti-fabrication, prompt-injection as
-data, reports, recommendations, AI hunting), SOAR (playbook validation,
-triggers, dry-run, approvals, state machine, idempotency, audit redaction),
-the SOC console, attack replay, analyst cases, decision explanations, and the
-investigation report.
-
-## Project Structure
+## 📁 Project Structure
 
 ```
 app.py                  Flask app: dashboard API, ingestion, SOC console, SOAR, AI, cases, replay
@@ -371,25 +485,10 @@ database.py             Authoritative SQLite schema (v5)
 templates/ static/      SOC command-center dashboard
 tests/                  591 offline tests
 demo.ps1                One-command local presentation launcher
-docs/screenshots/       Dashboard screenshots
+docs/                   Architecture diagram, screenshots, demo video
 ```
 
-## Screenshots
-
-> Captured from the running SOC Command Center (`docs/screenshots/`).
-
-| View | What it shows |
-|---|---|
-| ![SOC Command Center](docs/screenshots/soc-command-center.png) | **SOC Command Center** — status pills, counters, automation workers, severity/MITRE/source bars, live event stream |
-| ![Alert Queue](docs/screenshots/alert-queue.png) | **Alert Queue** — rule, correlation, source/target, severity, risk, Jev, AI, investigation state |
-| ![Alert Investigation](docs/screenshots/alert-investigation.png) | **Alert Investigation** — entities, evidence timeline, investigation questions, advisory AI panel with RAG sources |
-| ![WHY panel](docs/screenshots/why-panel.png) | **WHY THREATWATCH ALERTED** — detection, evidence, risk factors, classification, MITRE, Jev, AI, final state |
-| ![Decision Chain](docs/screenshots/decision-chain.png) | **Decision Chain** — nine stages from events to SOAR with live states |
-| ![Attack Replay](docs/screenshots/attack-replay.png) | **Attack Replay** — event-by-event replay through the real pipeline, `SYNTHETIC / LAB` |
-| ![SOAR](docs/screenshots/soar.png) | **SOAR Defense Center** — playbooks, dry-run executions, approval gate, incidents |
-| ![Audit Trail](docs/screenshots/audit-trail.png) | **Audit Trail** — workflow + case events, redacted and bounded |
-
-## Limitations
+## ⚠️ Limitations
 
 Honest constraints of the current implementation:
 
@@ -413,3 +512,9 @@ Honest constraints of the current implementation:
 - The console is operator tooling over the same database: polling is bounded
   intervals (no websockets), and state (suppression, validation history,
   replays) is per-database.
+
+---
+
+## License
+
+[MIT](LICENSE.txt) — © 2025 Amanullah Khan
